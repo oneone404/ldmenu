@@ -14,10 +14,15 @@ $uiResource=Join-Path $uiBuildDirectory 'resource.o'
 & (Join-Path (Split-Path $uiCompiler) 'x86_64-w64-mingw32-windres.exe') -I $PSScriptRoot -i (Join-Path $PSScriptRoot 'app.rc') -o $uiResource
 if($LASTEXITCODE){throw 'LDMenu icon resource failed'}
 $uiObjects+=$uiResource
+Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($OutputPath)) -ErrorAction SilentlyContinue | Stop-Process -Force
 & $uiCompiler --target=x86_64-w64-mingw32 -static -municode -mwindows -s '-Wl,--no-insert-timestamp' @uiObjects -ld2d1 -ldwrite -ldwmapi -lbcrypt -lpsapi -lshell32 -lole32 -luuid -o $OutputPath
 if($LASTEXITCODE){throw 'LDMenu build failed'}
 if(!$SkipTests){
-    & $OutputPath --self-test | Out-Host
+    $testExe=Join-Path $uiBuildDirectory 'unit_tests.exe'
+    $settingsObj=Join-Path $uiBuildDirectory 'settings.o'
+    & $uiCompiler --target=x86_64-w64-mingw32 -std=c++17 -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 -Oz -Wall -Wextra -static -s (Join-Path $PSScriptRoot 'tests\unit_tests.cpp') $settingsObj -lbcrypt -lpsapi -lole32 -lshell32 -luuid -o $testExe
+    if($LASTEXITCODE){throw 'Unit test build failed'}
+    & $testExe | Out-Host
     if($LASTEXITCODE){throw 'Backend tests failed'}
 }
 $uiAssetSource='D:\App\diagnostics\nph_standalone_research\loaded-libmod-arm64.private.so'

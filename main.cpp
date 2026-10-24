@@ -209,7 +209,7 @@ public:
     int run(){MSG m{};while(GetMessageW(&m,nullptr,0,0)>0){TranslateMessage(&m);DispatchMessageW(&m);}return int(m.wParam);}
 };
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int){
-    SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);int argc=0;wchar_t**args=CommandLineToArgvW(GetCommandLineW(),&argc);std::wstring mode=argc==2?args[1]:L"";LocalFree(args);if(mode==L"--self-test")return ldcontrol::tests();
+    SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);
     HANDLE singleton=CreateMutexW(nullptr,TRUE,L"Local\\NPHReconnectConsole-20261023");if(!singleton||GetLastError()==ERROR_ALREADY_EXISTS){if(singleton)CloseHandle(singleton);MessageBoxW(nullptr,L"Hãy thoát Config hoặc LDMenu đang chạy trước.",L"LDMenu",MB_OK|MB_ICONINFORMATION);return 3;}
     int code=0;{Application app;if(app.initialize(instance))code=app.run();else{MessageBoxW(nullptr,L"Không khởi tạo được Direct2D.",L"LDMenu",MB_OK|MB_ICONERROR);code=1;}}ReleaseMutex(singleton);CloseHandle(singleton);return code;
 }

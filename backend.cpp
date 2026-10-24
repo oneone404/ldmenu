@@ -58,7 +58,6 @@ static bool parseList(const std::string&text,std::vector<Row>&out){
     }
     if(parsed.size()>512)return false;std::sort(parsed.begin(),parsed.end(),[](auto&a,auto&b){return a.index<b.index;});out=std::move(parsed);return true;
 }
-static bool online(const std::string&listing,int index){const std::string serial="emulator-"+std::to_string(5554+index*2);std::istringstream lines(listing);std::string line;unsigned matches=0;bool ready=false;while(std::getline(lines,line)){std::istringstream row(line);std::string s,status;if(row>>s>>status&&s==serial){matches++;ready=status=="device";}}return matches==1&&ready;}
 enum class Link { Ready,Missing,Unknown };
 static Link classify(bool marker,bool listed,const std::string&listing,int index){
     if(marker)return Link::Ready;if(!listed||listing.find("List of devices attached")==std::string::npos)return Link::Unknown;
@@ -249,11 +248,11 @@ void Engine::monitor(){
         bool lost=false,repair=false,valid=false;
         {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==r.index&&row.generation==r.generation&&row.wanted&&row.phase==Phase::Connected&&!cancelled(j)){
             valid=true;if(health==Health::Unknown){row.misses=0;row.probeErrors=std::min(row.probeErrors+1,2u);repair=row.probeErrors>=2;}else{row.probeErrors=0;row.misses=health==Health::Alive?0:health==Health::Rebooted?2:std::min(row.misses+1,2u);lost=row.misses>=2;}
-            if(lost){row.applyAt=0;row.misses=0;}
+            if(lost){row.applyAt=0;row.misses=0;if(health==Health::Rebooted){row.bootId.clear();row.startTicks.clear();row.rootReady=false;}}
         }}
         if(valid&&repair&&!cancelled(j)){
             if(ensureAdb(j)){
-                {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==r.index&&row.generation==r.generation)row.probeErrors=0;}
+                {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==r.index&&row.generation==r.generation){row.bootId=j->bootId;row.rootReady=j->rootReady;row.probeErrors=0;}}
                 auto state=snapshot();auto row=std::find_if(state.rows.begin(),state.rows.end(),[&](auto&v){return v.index==r.index&&v.generation==r.generation;});
                 if(row!=state.rows.end()&&row->phase==Phase::Repairing)report(j,Phase::Connected,L"ADB đã phục hồi; chờ kiểm tra game",r.game,r.base);
             }
@@ -290,7 +289,7 @@ void Engine::recoverAdb(const std::shared_ptr<Job>&j,const Row&r){
     }
     if(cancelled(j))return;Row now;if(!fresh(j,now)){defer(j,Phase::WaitingAdb,L"Chờ xác minh LD sau khi ADB hồi");return;}
     j->bootId.clear();if(!ensureAdb(j))return;
-    {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==j->index&&row.generation==j->generation){row.vm=now.vm;row.ui=now.ui;row.probeErrors=0;row.misses=0;}}
+    {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==j->index&&row.generation==j->generation){row.vm=now.vm;row.ui=now.ui;row.bootId=j->bootId;row.rootReady=j->rootReady;row.probeErrors=0;row.misses=0;}}
     if(!r.game){if(r.automatic)queueReconnect(j,L"ADB đã hồi; chờ kết nối lại");else report(j,Phase::Queued,L"ADB đã hồi; chờ kết nối");return;}
     std::string output;const auto health=command(true,prefix+quoteArg(healthScript(r.game)),output,j,HealthTimeoutMs)?parseHealth(output,r):Health::Unknown;
     if(health==Health::Alive){report(j,Phase::Connected,L"ADB đã hồi; game vẫn đang chạy",r.game,r.base);return;}
@@ -314,6 +313,14 @@ bool Engine::ensureRoot(const std::shared_ptr<Job>&j){
     if(!cancelled(j))report(j,Phase::Failed,L"ADB chưa có quyền root; kiểm tra bật Root LDPlayer");
     return false;
 }
+static bool parseContextFrame(const std::string&text,DWORD pid,std::string&ticksOut){
+    std::istringstream vlines(text);std::vector<std::string> v;std::string line;
+    while(std::getline(vlines,line)){line=trim(line);if(!line.empty())v.push_back(line);if(v.size()>5)return false;}
+    if(v.size()!=5||v[0]!="LDMENU_CTX_V1"||v[4]!="LDMENU_CTX_END"||v[1].rfind("STAT1 ",0)||v[2].rfind("NOTE ",0)||v[3].rfind("STAT2 ",0))return false;
+    std::string ticks,afterTicks,note;char state=0,afterState=0;
+    if(!processStat(v[1].substr(6),pid,ticks,state)||state=='Z'||state=='X'||state=='x'||!bytes(v[2].substr(5),note,36)||!knownNote(note)||!processStat(v[3].substr(6),pid,afterTicks,afterState)||ticks!=afterTicks||afterState=='Z'||afterState=='X'||afterState=='x')return false;
+    ticksOut=std::move(ticks);return true;
+}
 bool Engine::context(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base,std::string*mapsOut,std::string*ticksOut){return inspectContext(j,pid,base,mapsOut,ticksOut)==ContextState::Verified;}
 ContextState Engine::inspectContext(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base,std::string*mapsOut,std::string*ticksOut){
     std::string text;if(!shell(j,L"ps -A -o PID,PPID,NAME; result=$?; echo LDMENU_PS_$result",text))return ContextState::Unknown;
@@ -325,11 +332,8 @@ ContextState Engine::inspectContext(const std::shared_ptr<Job>&j,DWORD&pid,unsig
     auto maps=[&](DWORD p,unsigned long long&b,std::string&raw){std::string out;if(!shell(j,L"cat /proc/"+std::to_wstring(p)+L"/maps && echo LDMENU_MAPS_OK",out))return ContextState::Unknown;out=trim(out);const std::string end="LDMENU_MAPS_OK";if(out.size()<end.size()||out.compare(out.size()-end.size(),end.size(),end))return ContextState::Unknown;out.resize(out.size()-end.size());raw=out;return classifyMaps(out,b);};
     unsigned matches=0;for(auto p:candidates){unsigned long long b=0;std::string raw;const auto state=maps(p,b,raw);if(state==ContextState::Unknown)return state;if(state==ContextState::Verified){pid=p;base=b;verifiedMaps=std::move(raw);matches++;}}
     if(!matches)return ContextState::Absent;if(matches!=1)return ContextState::Unknown;
-    const auto verifyScript=L"st1=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; note=$(dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') || exit 1; st2=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; printf 'LDMENU_CTX_V1\\n%s\\n%s\\n%s\\nLDMENU_CTX_END\\n' \"$st1\" \"$note\" \"$st2\"";
-    if(!shell(j,verifyScript,text))return ContextState::Unknown;
-    std::istringstream vlines(text);std::vector<std::string> v;while(std::getline(vlines,line)){line=trim(line);if(!line.empty())v.push_back(line);if(v.size()>6)return ContextState::Unknown;}
-    std::string ticks,afterTicks,note;char state=0,afterState=0;
-    if(v.size()!=5||v[0]!="LDMENU_CTX_V1"||v[4]!="LDMENU_CTX_END"||!processStat(v[1],pid,ticks,state)||state=='Z'||state=='X'||state=='x'||!bytes(v[2],note,36)||!knownNote(note)||!processStat(v[3],pid,afterTicks,afterState)||ticks!=afterTicks||afterState=='Z'||afterState=='X'||afterState=='x')return ContextState::Unknown;
+    const auto verifyScript=L"st1=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; note=$(dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') || exit 1; st2=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; printf 'LDMENU_CTX_V1\\nSTAT1 %s\\nNOTE %s\\nSTAT2 %s\\nLDMENU_CTX_END\\n' \"$st1\" \"$note\" \"$st2\"";
+    std::string ticks;if(!shell(j,verifyScript,text)||!parseContextFrame(text,pid,ticks))return ContextState::Unknown;
     if(mapsOut)*mapsOut=std::move(verifiedMaps);if(ticksOut)*ticksOut=std::move(ticks);
     return ContextState::Verified;
 }
@@ -359,8 +363,9 @@ bool Engine::restart(const std::shared_ptr<Job>&j,const Row&old){
     // Launch detached from the terminal's job; otherwise closing a test runner can kill LD.
     BOOL inJob=FALSE;if(!IsProcessInJob(GetCurrentProcess(),nullptr,&inJob))return false;DWORD flags=CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP;if(inJob)flags|=CREATE_BREAKAWAY_FROM_JOB;
     std::wstring cmd=L"\""+std::wstring(Console)+L"\" launch --index "+std::to_wstring(j->index);STARTUPINFOW si{};si.cb=sizeof(si);PROCESS_INFORMATION pi{};if(!CreateProcessW(Console,cmd.data(),nullptr,nullptr,FALSE,flags,nullptr,nullptr,&si,&pi))return false;CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
-    end=GetTickCount64()+120000;while(GetTickCount64()<end){if(!wait(1500,j))return false;if(fresh(j,now)&&now.vm!=old.vm){{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.vm=now.vm;r.ui=now.ui;}}report(j,Phase::Repairing,L"LD đã mở lại; chờ 30 giây");return wait(30000,j);}}return false;
+    end=GetTickCount64()+120000;while(GetTickCount64()<end){if(!wait(1500,j))return false;if(fresh(j,now)&&now.vm!=old.vm){j->bootId.clear();j->rootReady=false;{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.vm=now.vm;r.ui=now.ui;r.bootId.clear();r.startTicks.clear();r.rootReady=false;}}report(j,Phase::Repairing,L"LD đã mở lại; chờ 30 giây");return wait(30000,j);}}return false;
 }
+static std::string noteHexString(){std::string h="040000001400000003000000474e5500";char b[3];for(auto v:BuildId){std::snprintf(b,3,"%02x",v);h+=b;}return h;}
 void Engine::connected(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long base,const std::string&verifiedTicks){
     std::string ticks=verifiedTicks;
     if(ticks.empty()){std::string stat;char processState=0;if(!shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",stat,HealthTimeoutMs)||!processStat(stat,pid,ticks,processState)||processState=='Z'||processState=='X'||processState=='x'){report(j,Phase::Failed,L"Chưa xác minh được danh tính tiến trình game");return;}}
@@ -372,9 +377,11 @@ void Engine::connected(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long
 }
 bool Engine::controlMatches(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long base,const Config&config,bool&known){
     known=false;if(j->startTicks.empty())return false;
-    const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(pid)+L"/stat | cut -d ' ' -f20) = "+ticks;
+    const auto noteHex=noteHexString();const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),expected(noteHex.begin(),noteHex.end()),mem=L"/proc/"+std::to_wstring(pid)+L"/mem";
+    const auto start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(pid)+L"/stat | cut -d ' ' -f20) = "+ticks;
+    const auto note=L"test $(dd if="+mem+L" bs=1 skip="+std::to_wstring(base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') = "+expected;
     std::string output,values;
-    if(!shell(j,start+L" && dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x117044)+L" count=48 2>/dev/null | xxd -p && "+start,output)||!bytes(output,values,48))return false;
+    if(!shell(j,start+L" && "+note+L" && dd if="+mem+L" bs=1 skip="+std::to_wstring(base+0x117044)+L" count=48 2>/dev/null | xxd -p && "+start+L" && "+note,output)||!bytes(output,values,48))return false;
     known=true;return sameControl(values,config);
 }
 static bool validWord(unsigned relative,unsigned value){return relative==0?(value==0||value==1||value==4||value==11):relative==8?value<=2:relative==12||relative==4||relative==24||relative==36?value<=1:relative==32?value<=6:relative==20?(value==0||value==11):relative==28?value<=2147483647u:relative==48?value==0:false;}
@@ -396,8 +403,8 @@ static bool writableControl(const std::string&maps,unsigned long long base,unsig
 bool Engine::word(const std::shared_ptr<Job>&j,const Row&row,unsigned relative,unsigned value,bool checkVm){
     if(!validWord(relative,value)||cancelled(j)||j->startTicks.empty())return false;std::string output;
     if(checkVm){Row now;if(!fresh(j,now)||now.vm!=row.vm)return false;}
-    const auto encoded=littleHex(value);const std::wstring data(encoded.begin(),encoded.end()),ticks(j->startTicks.begin(),j->startTicks.end());const auto memory=L"/proc/"+std::to_wstring(row.game)+L"/mem";const auto address=std::to_wstring(row.base+0x117044+relative);
-    std::string noteHex="040000001400000003000000474e5500";char byte[3];for(auto v:BuildId){std::snprintf(byte,3,"%02x",v);noteHex+=byte;}const std::wstring expected(noteHex.begin(),noteHex.end());
+    const auto encoded=littleHex(value),noteHex=noteHexString();const std::wstring data(encoded.begin(),encoded.end()),ticks(j->startTicks.begin(),j->startTicks.end()),expected(noteHex.begin(),noteHex.end());
+    const auto memory=L"/proc/"+std::to_wstring(row.game)+L"/mem",address=std::to_wstring(row.base+0x117044+relative);
     const auto start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(row.game)+L"/stat | cut -d ' ' -f20) = "+ticks;
     const auto note=L"test $(dd if="+memory+L" bs=1 skip="+std::to_wstring(row.base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') = "+expected;
     const auto script=start+L" && "+note+L" && printf "+data+L" | xxd -r -p | dd of="+memory+L" seek="+address+L" bs=1 count=4 2>/dev/null && test $(dd if="+memory+L" bs=1 skip="+address+L" count=4 2>/dev/null | xxd -p | tr -d '[:space:]') = "+data+L" && "+start+L" && "+note+L" && echo LDMENU_WORD_OK";
@@ -409,10 +416,14 @@ bool Engine::readMemory(const std::shared_ptr<Job>&j,const Row&r,unsigned offset
     if(!allowed)return false;const std::wstring ticks(j->startTicks.begin(),j->startTicks.end());std::string output;
     return shell(j,L"test $(sed 's/.*) //' /proc/"+std::to_wstring(r.game)+L"/stat | cut -d ' ' -f20) = "+ticks+L" && dd if=/proc/"+std::to_wstring(r.game)+L"/mem bs=1 skip="+std::to_wstring(r.base+offset)+L" count="+std::to_wstring(count)+L" 2>/dev/null | xxd -p",output)&&bytes(output,data,count);
 }
+static bool verifyResetData(const std::string&output){
+    std::string data;if(!bytes(output,data,52))return false;
+    for(auto offset:resetOffsets())if(u32(data,offset)!=0)return false;
+    return true;
+}
 bool Engine::resetAll(const std::shared_ptr<Job>&j,const Row&r){
     if(cancelled(j)||j->startTicks.empty()||!r.game)return false;
-    const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),memory=L"/proc/"+std::to_wstring(r.game)+L"/mem";
-    std::string noteHex="040000001400000003000000474e5500";char byte[3];for(auto v:BuildId){std::snprintf(byte,3,"%02x",v);noteHex+=byte;}const std::wstring expected(noteHex.begin(),noteHex.end());
+    const auto noteHex=noteHexString();const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),expected(noteHex.begin(),noteHex.end()),memory=L"/proc/"+std::to_wstring(r.game)+L"/mem";
     const auto start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(r.game)+L"/stat | cut -d ' ' -f20) = "+ticks;
     const auto note=L"test $(dd if="+memory+L" bs=1 skip="+std::to_wstring(r.base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') = "+expected;
     std::wstring writes;
@@ -421,14 +432,24 @@ bool Engine::resetAll(const std::shared_ptr<Job>&j,const Row&r){
         writes+=L"printf 00000000 | xxd -r -p | dd of="+memory+L" seek="+std::to_wstring(r.base+0x117044+offset)+L" bs=1 count=4 2>/dev/null && (usleep 100000 2>/dev/null || sleep 0.1) && ";
     }
     const auto script=start+L" && "+note+L" && "+writes+start+L" && "+note+L" && dd if="+memory+L" bs=1 skip="+std::to_wstring(r.base+0x117044)+L" count=52 2>/dev/null | xxd -p";
-    std::string output,data;if(!shell(j,script,output)||!bytes(output,data,52))return false;
-    for(auto offset:resetOffsets())if(u32(data,offset)!=0)return false;
-    return true;
+    std::string output;return shell(j,script,output)&&verifyResetData(output);
 }
 static bool vectorBounds(const std::string&data,unsigned long long&begin,size_t&count){
     if(data.size()!=24)return false;begin=u64(data,0);const auto end=u64(data,8),capacity=u64(data,16);
     if(begin%4||end<begin||capacity<end||capacity-begin>65536||end-begin>256||((end-begin)%4)||capacity>=0x800000000000ULL)return false;
     count=size_t((end-begin)/4);return !count||begin>=4096;
+}
+static bool parseFilterMetaLatch(const std::string&out,std::string&meta,unsigned long long&begin,size_t&count,char&latch){
+    std::string metaLatch;if(!bytes(out,metaLatch,25))return false;
+    meta=metaLatch.substr(0,24);latch=metaLatch[24];
+    return vectorBounds(meta,begin,count);
+}
+static bool verifyFilterBody(const std::string&out,const std::string&expectedMeta,const std::vector<unsigned>&ids,bool&matches){
+    if(ids.empty()||ids.size()>64)return false;
+    std::string bodyAfter;const size_t count=ids.size();
+    if(!bytes(out,bodyAfter,count*4+24)||bodyAfter.substr(count*4)!=expectedMeta)return false;
+    matches=true;for(size_t i=0;i<count;i++)if(u32(bodyAfter,i*4)!=ids[i])matches=false;
+    return true;
 }
 static bool readableRange(const std::string&maps,unsigned long long address,size_t size){
     if(!size||size>256||address>0x800000000000ULL-size)return false;std::istringstream lines(maps);std::string line;
@@ -440,16 +461,12 @@ bool Engine::waitFilter(const std::shared_ptr<Job>&j,const Row&r,const std::vect
     const auto start=L"test $(sed 's/.*) //' /proc/"+pid+L"/stat | cut -d ' ' -f20) = "+ticks;
     std::string maps;const auto end=GetTickCount64()+6000;
     do{
-        std::string out,metaLatch;unsigned long long begin=0;size_t count=0;
-        if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x1187f8)+L" count=1 2>/dev/null; } | xxd -p",out)||!bytes(out,metaLatch,25))return false;
-        const auto meta=metaLatch.substr(0,24);const char latch=metaLatch[24];
-        if(!vectorBounds(meta,begin,count))return false;
+        std::string out,meta;unsigned long long begin=0;size_t count=0;char latch=0;
+        if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x1187f8)+L" count=1 2>/dev/null; } | xxd -p",out)||!parseFilterMetaLatch(out,meta,begin,count,latch))return false;
         bool matches=count==ids.size()&&(!zeroMailbox||latch==0);
         if(matches&&count){
             if((maps.empty()||!readableRange(maps,begin,count*4))&&(!shell(j,L"cat /proc/"+pid+L"/maps",maps)||!readableRange(maps,begin,count*4)))return false;
-            std::string bodyAfter;
-            if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(begin)+L" count="+std::to_wstring(count*4)+L" 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; } | xxd -p",out)||!bytes(out,bodyAfter,count*4+24)||bodyAfter.substr(count*4)!=meta)return false;
-            for(size_t i=0;i<count;i++)if(u32(bodyAfter,i*4)!=ids[i])matches=false;
+            if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(begin)+L" count="+std::to_wstring(count*4)+L" 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; } | xxd -p",out)||!verifyFilterBody(out,meta,ids,matches))return false;
         }
         if(matches)return true;
         if(!wait(250,j))return false;
@@ -573,133 +590,5 @@ void Engine::loop(){
         if(job){if(job->features)apply(job,selected);else if(job->recovery)recoverAdb(job,selected);else if(!cancelled(job))connect(job);{std::lock_guard<std::mutex> lock(mutex_);active_.reset();if(job->batch)nextPlay_=GetTickCount64()+playGap_;playChanged=advancePlayLocked(GetTickCount64());}if(playChanged||job->batch)notify();continue;}
         HANDLE events[]={stop_,wake_};const auto now=GetTickCount64();const DWORD sleep=due==~0ULL?INFINITE:DWORD(std::min<ULONGLONG>(due>now?due-now:0,MAXDWORD-1));WaitForMultipleObjects(2,events,FALSE,sleep);
     }
-}
-int tests(){int count=0,failed=0;auto check=[&](bool ok){count++;if(!ok){failed++;std::fprintf(stderr,"CHECK_FAILED %d\n",count);}};std::vector<Row> rows;
-    check(parseList("0,LD,0,0,0,-1,-1,960,540,160\r\r\n2,LD-2,1,2,1,100,200,960,540,160\r\r\n",rows)&&rows.size()==2&&rows[1].index==2&&rows[1].vm==200);
-    check(!parseList("2,LD-2,1,2,1,100,200,960,540,160\n2,Copy,1,2,1,100,200,960,540,160",rows));
-    check(!parseList("2,LD-2,1,2,1,100,0,960,540,160",rows));check(!parseList("2,LD-2,1,2,1,100,4294967296,960,540,160",rows));check(!parseList("broken",rows));
-    std::string devices="List of devices attached\nemulator-5558\tdevice\n";check(online(devices,2)&&!online(devices,1));check(!online(devices+"emulator-5558\tdevice\n",2));check(classify(true,false,"",2)==Link::Ready);check(classify(false,true,devices,1)==Link::Missing);check(classify(false,true,devices,2)==Link::Unknown);check(classify(false,false,"",2)==Link::Unknown);
-    std::wstring component;check(launcher("com.vng.playtogether/.Main\r\r\n",component));check(!launcher("com.vng.playtogether/.Main;bad",component));check(!launcher("com.vng.playtogether/.Main\ncom.vng.playtogether/.Other",component));check(!launcher("com.haegin.playtogether/.Main",component));
-    unsigned long long b=0;std::string maps="06fc0000-070cd000 r--p 00000000 08:12 12 /data/local/tmp/libmod.so (deleted)\n";check(moduleBase(maps,b)&&b==0x6fc0000);check(!moduleBase(maps+maps,b));check(!moduleBase("06fc0000-070cd000 r--p 00000000 08:12 12 /data/local/tmp/libmod.so.fake",b));std::string note(36,'\0');note[0]=4;note[4]=20;note[8]=3;note.replace(12,4,"GNU\0",4);std::copy(std::begin(BuildId),std::end(BuildId),note.begin()+16);check(knownNote(note));note[30]^=1;check(!knownNote(note));check(!knownNote("short"));
-    check(classify(false,true,devices+"emulator-5558\tdevice\n",2)==Link::Unknown);
-    check(classify(false,true,"List of devices attached\nemulator-5558\tunauthorized\n",2)==Link::Unknown);
-    check(classify(false,true,"List of devices attached\nemulator-5558\toffline\n",2)==Link::Missing);
-    check(quoteArg(L"push C:\\temp\\module.so /data/local/tmp/libmod.so")==L"\"push C:\\temp\\module.so /data/local/tmp/libmod.so\"");
-    check(quoteArg(L"push \"C:\\my folder\\module.so\" /data/local/tmp/libmod.so")==L"\"push \\\"C:\\my folder\\module.so\\\" /data/local/tmp/libmod.so\"");
-    check(ModuleLoadTimeoutMs==60000&&PostConnectDelayMs==60000);
-    check(trim("  0\r\r\n")=="0");unsigned long long n;check(!number("18446744073709551616",n));
-    Config cfg;cfg.function=13;cfg.filter=6;cfg.sell=true;cfg.reconnect=true;std::vector<SavedConfig> saved={{2,L"LD-2",cfg},{7,L"LD Tiếng Việt",{}}},decoded;
-    check(decodeSettings(encodeSettings(saved),decoded)&&decoded.size()==2&&decoded[0].config.function==13&&decoded[0].config.filter==6&&decoded[0].config.reconnect&&decoded[0].config.sell&&decoded[1].name==L"LD Tiếng Việt");
-    check(!decodeSettings("{broken",decoded));check(!decodeSettings("{\"schema\":2,\"devices\":[]}",decoded));
-    check(!decodeSettings(encodeSettings({saved[0],saved[0]}),decoded));
-    auto invalid=saved;invalid[0].index=-1;check(!decodeSettings(encodeSettings(invalid),decoded));invalid=saved;invalid[0].config.function=3;check(!decodeSettings(encodeSettings(invalid),decoded));invalid=saved;invalid[0].config.filter=7;check(!decodeSettings(encodeSettings(invalid),decoded));
-    auto oversized=encodeSettings(saved);auto at=oversized.find("\"index\": 2");if(at!=std::string::npos)oversized.replace(at,10,"\"index\": 4294967298");check(!decodeSettings(oversized,decoded));
-    check(validWord(4,1)&&validWord(8,0)&&!validWord(32,7)&&validWord(8,2)&&validWord(32,6)&&!validWord(20,1)&&!validWord(48,1)&&!validWord(28,2147483648u));
-    const std::string writable="07000000-07100000 rw-p 00000000 08:12 12 /data/local/tmp/libmod.so (deleted)\n";
-    check(writableControl(writable,0x06f00000,0));check(!writableControl(writable,0x06d00000,0));check(!writableControl("07000000-07100000 r--p 00000000 08:12 12 /data/local/tmp/libmod.so\n",0x06f00000,0));check(littleHex(0x1234abcd)=="cdab3412");
-    check(writableControl("070d6000-070d7000 rw-p 00114000 08:12 12 /data/local/tmp/libmod.so (deleted)\n070d7000-070ed000 rw-p 00000000 00:00 0\n",0x06fc0000,0));
-    check(!writableControl("070d7000-070ed000 rw-p 00000000 00:00 0\n",0x06fc0000,0));
-    check(!writableControl("070d6000-070d7000 rw-p 00114000 08:12 12 /data/local/tmp/libmod.so\n070d7000-070ed000 rw-p 00000000 08:12 20 /other.so\n",0x06fc0000,0));
-    std::string elf(120,'\0');auto set32=[&](size_t p,unsigned value){for(unsigned i=0;i<4;i++)elf[p+i]=char(value>>(i*8));};set32(0,0x464c457f);elf[4]=2;elf[5]=1;set32(16,(183u<<16)|3);set32(32,64);elf[54]=56;elf[56]=1;set32(64,1);set32(68,6);set32(80,0x116308);set32(104,93208);check(controlSegment(elf));set32(68,4);check(!controlSegment(elf));check(!controlSegment("short"));
-    GlobalSettings common;common.defaults=cfg;common.settleSeconds=90;GlobalSettings commonRead;
-    check(decodeSettings(encodeSettings(saved,common),decoded,&commonRead)&&commonRead.settleSeconds==90&&commonRead.defaults.function==13&&commonRead.defaults.filter==6&&commonRead.defaults.reconnect&&commonRead.defaults.sell&&decoded.size()==2);
-    check(decodeSettings("{\"schema\":1,\"devices\":[]}",decoded,&commonRead)&&commonRead.settleSeconds==60&&commonRead.defaults.function==0&&!commonRead.defaults.reconnect);
-    common.settleSeconds=600;check(decodeSettings(encodeSettings({},common),decoded,&commonRead)&&commonRead.settleSeconds==600);common.settleSeconds=601;check(!decodeSettings(encodeSettings({},common),decoded,&commonRead));
-    common.settleSeconds=0;check(validGlobal(common)&&decodeSettings(encodeSettings({},common),decoded,&commonRead)&&commonRead.settleSeconds==0);common.defaults.function=7;check(!validGlobal(common)&&!decodeSettings(encodeSettings({},common),decoded,&commonRead));
-    common={};common.playDelaySeconds=17;common.playTargets={{2,L"LD-2"},{9,L"LD Tiếng Việt"}};
-    check(decodeSettings(encodeSettings(saved,common),decoded,&commonRead)&&commonRead.playDelaySeconds==17&&commonRead.playTargets.size()==2&&commonRead.playTargets[1].name==L"LD Tiếng Việt"&&decoded.size()==2);
-    common.playDelaySeconds=3601;check(!validGlobal(common)&&!decodeSettings(encodeSettings({},common),decoded));common.playDelaySeconds=0;check(validGlobal(common));
-    common.playTargets.push_back({2,L"Duplicate"});check(!validGlobal(common)&&!decodeSettings(encodeSettings({},common),decoded));common.playTargets={{-1,L"Bad"}};check(!validGlobal(common));common.playTargets={{3,L""}};check(!validGlobal(common));
-    {
-        Engine controller;Row open;open.index=2;open.name=L"LD-2";open.running=true;Row closed;closed.index=3;closed.name=L"LD-3";Row attached;attached.index=4;attached.name=L"LD-4";attached.running=true;attached.wanted=true;attached.phase=Phase::Connected;attached.game=123;
-        controller.state_.rows={open,closed,attached};controller.state_.global.playDelaySeconds=17;controller.state_.global.playTargets={{2,L"LD-2"},{3,L"LD-3"},{4,L"LD-4"}};std::wstring error;
-        check(controller.play(error)&&controller.state_.rows[0].wanted&&controller.state_.rows[0].playQueued&&controller.state_.rows[0].phase==Phase::Queued&&controller.playGap_==17000);
-        check(!controller.state_.rows[1].wanted&&controller.state_.rows[2].wanted&&controller.state_.rows[2].phase==Phase::Connected&&controller.state_.rows[2].game==123);
-        const auto generation=controller.state_.rows[0].generation;check(controller.play(error)&&controller.state_.rows[0].generation==generation&&controller.state_.rows[0].wanted);
-        controller.state_.playRunning=false;controller.state_.global.playTargets={{2,L"Renamed"}};check(!controller.play(error));controller.state_.global.playTargets.clear();check(!controller.play(error));
-    }
-    {
-        Engine controller;Row current;current.index=1;current.running=true;current.wanted=true;current.game=123;current.phase=Phase::Connected;Row pending;pending.index=2;pending.running=true;pending.wanted=true;pending.playQueued=true;pending.phase=Phase::Queued;controller.state_.rows={current,pending};controller.state_.playRunning=true;controller.nextPlay_=1000;controller.active_=std::make_shared<Job>();controller.active_->index=1;controller.active_->batch=true;
-        controller.pausePlay();check(controller.state_.playStopping&&controller.state_.playRunning&&!controller.active_->cancelled);
-        std::wstring resumeError;const auto pendingGeneration=controller.state_.rows[1].generation;check(controller.play(resumeError)&&!controller.state_.playStopping&&controller.state_.playRunning&&!controller.active_->cancelled&&controller.state_.rows[1].generation==pendingGeneration);controller.pausePlay();
-        check(!controller.advancePlayLocked(2000)&&controller.state_.rows[1].wanted);controller.active_.reset();
-        controller.pausePlay();check(controller.nextPlay_==1000);check(!controller.advancePlayLocked(999)&&controller.state_.playRunning);check(controller.advancePlayLocked(1000)&&!controller.state_.playRunning&&!controller.state_.playStopping);
-        check(controller.state_.rows[0].wanted&&controller.state_.rows[0].game==123&&controller.state_.rows[0].phase==Phase::Connected);
-        check(!controller.state_.rows[1].wanted&&!controller.state_.rows[1].playQueued&&controller.state_.rows[1].phase==Phase::Idle);
-        controller.state_.playRunning=true;controller.nextPlay_=3000;check(!controller.advancePlayLocked(2999));check(controller.advancePlayLocked(3000)&&!controller.state_.playRunning);
-    }
-    {
-        std::string values(48,'\0');Config c;check(sameControl(values,c));c.function=2;c.filter=1;check(!sameControl(values,c));auto write=[&](size_t offset,unsigned value){for(unsigned i=0;i<4;i++)values[offset+i]=char(value>>(8*i));};write(0,4);write(8,1);write(32,1);write(36,1);check(sameControl(values,c));write(8,2);check(!sameControl(values,c));c.function=13;check(sameControl(values,c));write(12,1);check(!sameControl(values,c));c.sell=true;check(sameControl(values,c));write(32,0);check(!sameControl(values,c));check(!sameControl("short",c));
-    }
-    {
-        auto stat=[](DWORD pid,const char*ticks,char state='S'){std::string value=std::to_string(pid)+" (game (worker)) "+state;for(unsigned i=4;i<22;i++)value+=" 0";return value+" "+ticks+" 0";};
-        std::string ticks;char state=0;check(processStat(stat(100,"12345"),100,ticks,state)&&ticks=="12345"&&state=='S');check(!processStat(stat(100,"12345"),101,ticks,state));check(!processStat("100 (bad) S 0",100,ticks,state));
-        Row r;r.game=100;r.bootId="11111111-2222-4333-8444-555555555555";r.startTicks="12345";
-        auto frame=[&](const std::string&boot,const std::string&pids,const std::string&st){return "LDMENU_HEALTH_V1\nBOOT "+boot+"\nPIDS "+pids+"\nSTAT "+st+"\nLDMENU_HEALTH_END\n";};
-        check(parseHealth(frame(r.bootId,"0 100 200","0 "+stat(100,"12345")),r)==Health::Alive);
-        check(parseHealth(frame(r.bootId,"1","1"),r)==Health::Missing);
-        check(parseHealth(frame(r.bootId,"0 100 200","1"),r)==Health::Unknown);
-        check(parseHealth(frame(r.bootId,"0 100 100","0 "+stat(100,"12345")),r)==Health::Unknown);
-        check(parseHealth(frame(r.bootId,"0 100","0 "+stat(100,"99999")),r)==Health::Missing);
-        check(parseHealth(frame(r.bootId,"0 100","0 "+stat(100,"12345",'Z')),r)==Health::Missing);
-        check(parseHealth(frame("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","1","1"),r)==Health::Rebooted);
-        check(parseHealth("error: device offline",r)==Health::Unknown);
-        check(number("18446744073709551615",n)&&n==~0ULL);check(!number("18446744073709551616",n));
-        unsigned long long base=0;const std::string loaded="01000000-01001000 r--p 00000000 08:12 12 /data/local/tmp/libmod.so (deleted)\n";
-        check(classifyMaps(loaded,base)==ContextState::Verified&&base==0x1000000);
-        check(classifyMaps(loaded+loaded,base)==ContextState::Unknown);check(classifyMaps("permission denied\n",base)==ContextState::Unknown);check(classifyMaps("",base)==ContextState::Unknown);
-        check(classifyMaps("01000000-01001000 rw-p 00000000 00:00 18446744073709551615 [anon:heap]\n",base)==ContextState::Absent);
-    }
-    {
-        Row r;ULONGLONG retry=0;for(unsigned i=1;i<=5;i++)check(reserveRestartAt(r,i*100,retry));
-        check(!reserveRestartAt(r,600,retry)&&retry==RestartWindowMs+100);
-        check(reserveRestartAt(r,RestartWindowMs+100,retry)&&r.restartTimes[0]==200);
-        check(!reserveRestartAt(r,RestartWindowMs+101,retry)&&retry==RestartWindowMs+200);
-        Engine c;Row row;row.index=2;row.name=L"LD-2";row.wanted=true;row.running=true;row.restartTimes=r.restartTimes;c.state_.rows.push_back(row);c.toggle(2);c.toggle(2);check(c.state_.rows[0].restartTimes==r.restartTimes);
-    }
-    {
-        Engine c;Row first;first.index=1;first.name=L"LD-1";first.wanted=first.running=true;first.phase=Phase::Connected;first.applyAt=500;Row second=first;second.index=2;second.name=L"LD-2";second.applyAt=200;c.state_.rows={first,second};
-        ULONGLONG due=~0ULL;std::shared_ptr<Job> job;Row picked;check(c.selectJobLocked(1000,due,job,picked)&&picked.index==2&&job->features);
-        c.state_.rows[1].applyAt=1200;Row manual=first;manual.index=3;manual.phase=Phase::Queued;manual.applyAt=0;c.state_.rows.push_back(manual);c.nextConnect_=300;due=~0ULL;job.reset();check(c.selectJobLocked(1000,due,job,picked)&&picked.index==3&&!job->features);
-        c.state_.rows[0].applyAt=2000;c.state_.rows[1].applyAt=2200;c.state_.rows[2].phase=Phase::WaitingAdb;c.state_.rows[2].retryAt=1500;due=~0ULL;job.reset();check(!c.selectJobLocked(1000,due,job,picked)&&due==1500);
-        due=~0ULL;check(c.selectJobLocked(1600,due,job,picked)&&picked.index==3&&job->recovery);
-        c.state_.rows.clear();due=~0ULL;job.reset();check(!c.selectJobLocked(10000,due,job,picked)&&due==~0ULL);
-    }
-    {
-        Engine c;Row r;r.index=2;r.name=L"LD-2";r.running=r.wanted=true;r.generation=7;r.phase=Phase::Connected;r.config.reconnect=true;r.game=100;c.state_.rows.push_back(r);
-        auto job=std::make_shared<Job>();job->index=2;job->name=r.name;job->generation=7;c.active_=job;c.queueReconnect(job,L"retry");check(c.state_.rows[0].automatic&&c.state_.rows[0].phase==Phase::Queued);
-        c.state_.rows[0].config.reconnect=false;c.updateReconnectLocked(c.state_.rows[0],true);check(job->cancelled&&c.state_.rows[0].generation==8&&c.state_.rows[0].phase==Phase::Failed);
-        c.report(job,Phase::Connected,L"stale",100,0x1000);check(c.state_.rows[0].phase==Phase::Failed);
-        c.state_.rows[0].config.reconnect=true;c.updateReconnectLocked(c.state_.rows[0],false);check(c.state_.rows[0].phase==Phase::Queued&&c.state_.rows[0].generation==9);
-        c.state_.rows[0].automatic=false;auto manual=std::make_shared<Job>();manual->index=2;manual->name=r.name;manual->generation=9;c.active_=manual;c.state_.rows[0].config.reconnect=false;c.updateReconnectLocked(c.state_.rows[0],true);check(!manual->cancelled&&c.state_.rows[0].phase==Phase::Queued&&c.state_.rows[0].generation==9);
-        c.halt(1);c.halt(2);check(c.failure()==1&&c.cancelled({}));
-    }
-    {
-        std::vector<unsigned> ids={99};check(parseIds(L"",ids)&&ids.empty());check(parseIds(L" 12, 345,2147483647 ",ids)&&ids==std::vector<unsigned>({12,345,2147483647}));
-        check(!parseIds(L"0",ids)&&!parseIds(L"-1",ids)&&!parseIds(L"2147483648",ids));check(!parseIds(L"12,",ids)&&!parseIds(L",12",ids)&&!parseIds(L"1,,2",ids)&&!parseIds(L"1 2",ids)&&!parseIds(L"1; echo bad",ids));
-        check(parseIds(L"5555, 5555",ids)&&ids.size()==2);check(parseIds(idsText(ids),ids)&&ids==std::vector<unsigned>({5555,5555}));
-        std::wstring many=L"1";for(unsigned i=1;i<64;i++)many+=L",1";check(parseIds(many,ids)&&ids.size()==64);check(!parseIds(many+L",1",ids));
-        QuickConfig quick;quick.function=1;quick.ids={1,2};quick.sell=true;check(validQuick(quick));quick.function=14;check(!validQuick(quick));quick.sell=false;check(validQuick(quick));quick.function=2;check(!validQuick(quick));quick.function=1;quick.ids={0};check(!validQuick(quick));
-        quick={};check(quick.function==0&&validQuick(quick));quick.sell=true;check(!validQuick(quick));quick.sell=false;quick.ids={1};check(!validQuick(quick));quick={};quick.function=1;check(!needsQuickReset(quick,1,true)&&needsQuickReset(quick,1,false)&&needsQuickReset(quick,14,true)&&needsQuickReset(quick,0,true));
-        check(resetOffsets()==std::vector<unsigned>({0,36,48,12,8,32,20,4,24}));for(auto offset:resetOffsets())check(validWord(offset,0));
-        const auto fish=quickStart(1),farm=quickStart(14);check(fish.size()==2&&fish[0].offset==36&&fish[0].value==1&&fish[0].delay==100&&fish[1].offset==0&&fish[1].value==1);
-        check(farm.size()==2&&farm[0].offset==0&&farm[0].value==11&&farm[1].offset==20&&farm[1].value==11&&quickStart(2).empty());
-        std::string vector(24,'\0');auto store=[&](size_t p,unsigned long long value){for(unsigned k=0;k<8;k++)vector[p+k]=char(value>>(8*k));};unsigned long long begin=0;size_t size=0;
-        check(vectorBounds(vector,begin,size)&&size==0);store(0,4096);store(8,4104);store(16,4112);check(vectorBounds(vector,begin,size)&&size==2);store(8,4092);check(!vectorBounds(vector,begin,size));store(8,4104);store(16,4100);check(!vectorBounds(vector,begin,size));
-        check(readableRange("1000-2000 rw-p 0 00:00 0\n",4096,256)&&!readableRange("1000-2000 ---p 0 00:00 0\n",4096,4)&&!readableRange("1000-2000 rw-p 0 00:00 0\n",8190,4));
-    }
-    {
-        Engine c;Row r;r.index=2;r.name=L"LD-2";r.running=true;r.wanted=true;r.game=100;r.base=0x1000000;r.phase=Phase::Connected;r.config={2,1,true,true};r.applyAt=50;r.playQueued=true;c.state_.rows.push_back(r);
-        auto old=std::make_shared<Job>();old->index=2;old->generation=0;old->features=true;c.active_=old;
-        c.queueActionLocked(c.state_.rows[0],Intent::Reset);const auto&reset=c.state_.rows[0];check(old->cancelled&&reset.actionPending&&reset.intent==Intent::Reset&&reset.phase==Phase::Connected&&!reset.playQueued&&reset.generation==1);
-        check(reset.config.reconnect&&reset.config.function==2); // runtime action alone never mutates the saved profile
-        c.active_.reset();std::shared_ptr<Job> action;Row picked;ULONGLONG due=~0ULL;check(c.selectJobLocked(GetTickCount64()+1,due,action,picked)&&action->features&&picked.intent==Intent::Reset);
-        c.state_.rows[0].game=0;c.state_.rows[0].base=0;c.queueActionLocked(c.state_.rows[0],Intent::Reset);check(c.state_.rows[0].phase==Phase::Connected); // no connect/open job, even without a game
-        c.state_.rows[0].actionPending=false;c.active_.reset();std::wstring error;QuickConfig q;q.function=1;q.ids={12};check(c.runQuick(2,L"LD-2",q,error)&&c.state_.rows[0].phase==Phase::Queued&&c.state_.rows[0].intent==Intent::Quick);
-        check(!c.runQuick(2,L"LD-2",q,error)&&!c.runQuick(2,L"Renamed",q,error));
-        auto current=std::make_shared<Job>();current->index=2;current->name=L"LD-2";current->generation=c.state_.rows[0].generation;c.state_.rows[0].config.reconnect=true;c.queueReconnect(current,L"lost");check(c.state_.rows[0].phase==Phase::Failed&&!c.state_.rows[0].automatic&&!c.state_.rows[0].actionPending);
-        q={};c.active_.reset();check(c.runQuick(2,L"LD-2",q,error)&&c.state_.rows[0].intent==Intent::Reset&&c.state_.rows[0].phase==Phase::Connected&&c.state_.rows[0].config.reconnect);
-    }
-    std::printf("BACKEND_TESTS %d/%d\n",count-failed,count);return failed?1:0;
 }
 }
