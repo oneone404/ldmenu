@@ -13,7 +13,7 @@
 template<class T>static void release(T*&p){if(p){p->Release();p=nullptr;}}
 static D2D1_COLOR_F rgb(unsigned c,float a=1){return D2D1::ColorF(float(c>>16&255)/255,float(c>>8&255)/255,float(c&255)/255,a);}
 namespace UI {
-constexpr unsigned Background=0x0b0e14,Header=0x0f131c,Panel=0x131822,PanelHover=0x181f2c,Field=0x0d1118,Border=0x222b3a,BorderLight=0x303d52,Text=0xf0f4fc,Muted=0x8b98ae,Accent=0x8b5cf6,AccentHover=0x9d74f7,Hover=0x1f1d38,Green=0x34d399,Red=0xf87171,CloseRed=0xe81123,Amber=0xfbbf24;
+constexpr unsigned Background=0x000000,Panel=0x0c0c0c,Border=0x242424,Text=0xffffff,Muted=0x909090,Accent=0xb026ff,Hover=0x1b0829,Green=0x52d6a0,Red=0xf17c91,Amber=0xe7bc75;
 const wchar_t*Functions[]={L"OFF",L"Bọ Thành Tích",L"Bọ All Map"};
 const int FunctionValues[]={0,2,13};
 const wchar_t*Filters[]={L"OFF",L"Xanh Lá",L"Xanh Dương",L"Tím",L"Sự Kiện",L"Chỉ Thẻ",L"All Bọ"};
@@ -30,36 +30,28 @@ class Application {
     bool quickMode_=false,deviceReset_=false,globalReset_=false;ldcontrol::QuickConfig quickDraft_;
     unsigned draftDelay_=60;bool applyToRunning_=false;
     int globalTab_=0;float planScroll_=0;std::vector<ldcontrol::PlayTarget> draftTargets_;
-    HWND playDelayEdit_=nullptr,idsEdit_=nullptr;HFONT editFont_=nullptr;HBRUSH editBrush_=nullptr;WNDPROC editProcedure_=nullptr;
+    HWND playDelayEdit_=nullptr,idsEdit_=nullptr;HFONT editFont_=nullptr;WNDPROC editProcedure_=nullptr;
     int scrollVisible_=0,dragScroll_=0;float dragY_=0,dragStart_=0;
-    unsigned ramUsed_=0,ramTotal_=0,ramLoad_=0;
-    static constexpr float Top=44,RowHeight=34;
+    unsigned ramUsed_=0,ramTotal_=0;
+    static constexpr float Top=44,RowHeight=30;
     static LRESULT CALLBACK procedure(HWND w,UINT m,WPARAM p,LPARAM l){auto*a=reinterpret_cast<Application*>(GetWindowLongPtrW(w,GWLP_USERDATA));try{if(m==WM_NCCREATE){a=static_cast<Application*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);a->window_=w;SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}return a?a->message(m,p,l):DefWindowProcW(w,m,p,l);}catch(const std::bad_alloc&){if(a)a->engine_.halt(1);}catch(...){if(a)a->engine_.halt(2);}if(m==WM_PAINT)ValidateRect(w,nullptr);return m==WM_NCCREATE?FALSE:0;}
     static LRESULT CALLBACK editProcedure(HWND w,UINT m,WPARAM p,LPARAM l){auto*a=reinterpret_cast<Application*>(GetWindowLongPtrW(w,GWLP_USERDATA));if(a&&m==WM_KEYDOWN&&(p==VK_ESCAPE||p==VK_RETURN)){PostMessageW(a->window_,m,p,l);return 0;}return a?CallWindowProcW(a->editProcedure_,w,m,p,l):DefWindowProcW(w,m,p,l);}
     void invalidate(){if(!IsIconic(window_))InvalidateRect(window_,nullptr,FALSE);}
     void discard(){release(brush_);release(target_);}
     void updateRam(bool repaint=false){
         MEMORYSTATUSEX m{};m.dwLength=sizeof(m);if(!GlobalMemoryStatusEx(&m)||!m.ullTotalPhys)return;
-        const unsigned total=unsigned((m.ullTotalPhys+(1ULL<<29))>>30),used=unsigned(((m.ullTotalPhys-m.ullAvailPhys)+(1ULL<<29))>>30),load=unsigned(m.dwMemoryLoad);
-        if(used!=ramUsed_||total!=ramTotal_||load/10!=ramLoad_/10){ramUsed_=used;ramTotal_=total;ramLoad_=load;if(repaint)invalidate();}
+        const unsigned total=unsigned((m.ullTotalPhys+(1ULL<<29))>>30),used=unsigned(((m.ullTotalPhys-m.ullAvailPhys)+(1ULL<<29))>>30);
+        if(used!=ramUsed_||total!=ramTotal_){ramUsed_=used;ramTotal_=total;if(repaint)invalidate();}
     }
     HRESULT resources(){if(target_)return S_OK;RECT c;GetClientRect(window_,&c);auto props=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT);props.dpiX=dpi_;props.dpiY=dpi_;auto hr=factory_->CreateHwndRenderTarget(props,D2D1::HwndRenderTargetProperties(window_,D2D1::SizeU(c.right,c.bottom)),&target_);if(SUCCEEDED(hr))hr=target_->CreateSolidColorBrush(rgb(UI::Text),&brush_);if(FAILED(hr))discard();return hr;}
     void color(unsigned c,float a=1){brush_->SetColor(rgb(c,a));}
     void fill(float l,float t,float r,float b,unsigned c,float radius=0,float alpha=1){color(c,alpha);if(radius)target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(l,t,r,b),radius,radius),brush_);else target_->FillRectangle(D2D1::RectF(l,t,r,b),brush_);}
-    void stroke(float l,float t,float r,float b,unsigned c,float radius=0,float alpha=1){color(c,alpha);if(radius)target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(l,t,r,b),radius,radius),brush_);else target_->DrawRectangle(D2D1::RectF(l,t,r,b),brush_);}
-    void dot(float cx,float cy,float r,unsigned c,float alpha=1){color(c,alpha);target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx,cy),r,r),brush_);}
+    void stroke(float l,float t,float r,float b,unsigned c,float radius=0){color(c);if(radius)target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(l,t,r,b),radius,radius),brush_);else target_->DrawRectangle(D2D1::RectF(l,t,r,b),brush_);}
     void text(const std::wstring&s,float x,float y,float w,float h,unsigned c,IDWriteTextFormat*f=nullptr,DWRITE_TEXT_ALIGNMENT align=DWRITE_TEXT_ALIGNMENT_LEADING){f=f?f:font_;f->SetTextAlignment(align);color(c);target_->DrawTextW(s.c_str(),UINT32(s.size()),f,D2D1::RectF(x,y,x+w,y+h),brush_,D2D1_DRAW_TEXT_OPTIONS_CLIP);}
     void glyph(const wchar_t*s,float x,float y,float w,float h,unsigned c,bool caption=false){text(s,x,y,w,h,c,caption?caption_:icon_,DWRITE_TEXT_ALIGNMENT_CENTER);}
-    void iconButton(int id,const wchar_t*s,float x,float y,float size=28){const bool hot=hover_==id;fill(x,y,x+size,y+size,hot?UI::Hover:UI::Panel,6,hot?1.f:.7f);stroke(x,y,x+size,y+size,hot?UI::Accent:UI::Border,6,hot?.7f:.6f);glyph(s,x,y,size,size,hot?UI::Text:UI::Accent);}
-    void playButton(float x,float y){const bool running=state_.playRunning&&!state_.playStopping,hot=hover_==-16;fill(x,y,x+28,y+28,hot||running?UI::Hover:UI::Panel,7);stroke(x,y,x+28,y+28,running||hot?UI::Accent:UI::Border,7,running||hot?.85f:.6f);if(running){fill(x+9.5f,y+7.5f,x+12.8f,y+20.5f,UI::Accent,1.5f);fill(x+15.2f,y+7.5f,x+18.5f,y+20.5f,UI::Accent,1.5f);}else if(playShape_){D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Scale(.82f,.82f,D2D1::Point2F(14,14))*D2D1::Matrix3x2F::Translation(x,y));color(hot?UI::Text:UI::Accent);target_->FillGeometry(playShape_,brush_);target_->SetTransform(original);}}
-    void toggleDraw(float x,float y,bool on){fill(x,y,x+36,y+18,on?UI::Accent:0x232c3d,9);if(!on)stroke(x+.5f,y+.5f,x+35.5f,y+17.5f,UI::BorderLight,8.5f);dot(x+(on?27:9),y+9,6,UI::Text);}
-    static std::wstring rowTag(const ldcontrol::Row&r){
-        if(r.intent==ldcontrol::Intent::Quick||r.quickActive){const int q=r.quickActive?r.quickActive:r.quick.function;if(q==1)return r.quick.sell?L"Câu Cá • Bán":L"Câu Cá";if(q==14)return L"Farm All";}
-        std::wstring s=r.config.function==2?L"Bọ TT":r.config.function==13?L"Bọ Map":L"OFF";
-        if(r.config.filter>0&&r.config.filter<7)s+=L" • "+std::wstring(UI::Filters[r.config.filter]);
-        if(r.config.sell)s+=L" • Bán";
-        return s;
-    }
+    void iconButton(int id,const wchar_t*s,float x,float y,float size=30){if(hover_==id)fill(x,y,x+size,y+size,UI::Hover,5);glyph(s,x,y,size,size,UI::Accent);}
+    void playButton(float x,float y){const bool running=state_.playRunning&&!state_.playStopping;fill(x+1,y+1,x+29,y+29,hover_==-16||running?UI::Hover:UI::Panel,9);if(running){fill(x+10,y+8,x+13.5f,y+22,UI::Accent,1.7f);fill(x+18,y+8,x+21.5f,y+22,UI::Accent,1.7f);}else if(playShape_){D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Scale(.85f,.85f,D2D1::Point2F(15,15))*D2D1::Matrix3x2F::Translation(x,y));color(UI::Accent);target_->FillGeometry(playShape_,brush_);target_->SetTransform(original);}}
+    void toggleDraw(float x,float y,bool on){fill(x,y,x+36,y+18,on?UI::Accent:0x303030,9);color(UI::Text);target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+(on?27:9),y+9),6,6),brush_);}
     float listBottom()const{return std::max(Top+RowHeight,height_-12-(state_.error.empty()?0:26));}
     float listContent()const{return float(state_.rows.size())*RowHeight;}
     float paneX()const{return (width_-440)/2;}
@@ -67,7 +59,7 @@ class Application {
     bool globalSettings()const{return settingsIndex_==-2;}
     bool planTab()const{return globalSettings()&&globalTab_==0;}
     float paneHeight()const{return globalSettings()?396.f:quickMode_?340.f:300.f;}
-    float paneY()const{return std::max(40.f,(height_-paneHeight())/2);}
+    float paneY()const{return std::max(38.f,(height_-paneHeight())/2);}
     float controlsY()const{return globalSettings()?280.f:204.f;}
     float fieldY(int field)const{return globalSettings()?(field==1?108.f:field==2?166.f:224.f):(field==1?76.f:140.f);}
     int delaySelection()const{for(int i=0;i<7;i++)if(UI::Delays[i]==draftDelay_)return i;return 2;}
@@ -80,7 +72,7 @@ class Application {
     bool readPlayDelay(unsigned&out){wchar_t value[16]{};GetWindowTextW(playDelayEdit_,value,16);if(!*value)return false;out=0;for(auto*p=value;*p;p++){if(*p<L'0'||*p>L'9'||out>3600)return false;out=out*10+unsigned(*p-L'0');}return out<=3600;}
     bool targetSelected(const ldcontrol::Row&r)const{return std::any_of(draftTargets_.begin(),draftTargets_.end(),[&](auto&t){return t.index==r.index&&t.name==r.name;});}
     void setTarget(const ldcontrol::Row&r,bool selected){draftTargets_.erase(std::remove_if(draftTargets_.begin(),draftTargets_.end(),[&](auto&t){return t.index==r.index;}),draftTargets_.end());if(selected)draftTargets_.push_back({r.index,r.name});}
-    void checkDraw(float x,float y,bool on){fill(x,y,x+14,y+14,on?UI::Accent:UI::Field,3.5f);if(on)glyph(L"\uE73E",x,y,14,14,UI::Text,true);else stroke(x+.5f,y+.5f,x+13.5f,y+13.5f,UI::BorderLight,3.5f);}
+    void checkDraw(float x,float y,bool on){fill(x,y,x+14,y+14,on?UI::Accent:UI::Background,3);if(on)glyph(L"\uE73E",x,y,14,14,UI::Text,true);else stroke(x+.5f,y+.5f,x+13.5f,y+13.5f,UI::Border,3);}
     void clamp(){rowScroll_=std::clamp(rowScroll_,0.f,std::max(0.f,listContent()-(listBottom()-Top)));planScroll_=std::clamp(planScroll_,0.f,std::max(0.f,float(state_.rows.size())*20-208));}
     void showScroll(int id){scrollVisible_=id;SetTimer(window_,1,1100,nullptr);invalidate();}
     void scrollbar(int id,float top,float bottom,float content,float offset){if(content<=bottom-top||(scrollVisible_!=id&&dragScroll_!=id))return;float visible=bottom-top,thumb=std::max(22.f,visible*visible/content);float y=top+(visible-thumb)*offset/(content-visible);fill(width_-12,y,width_-8,y+thumb,UI::Accent,2);}
@@ -88,7 +80,7 @@ class Application {
     int functionSelection()const{for(int i=0;i<3;i++)if(UI::FunctionValues[i]==draft_.function)return i;return 0;}
     int hit(float x,float y){
         if(x<0||y<0||x>=width_||y>=height_)return -99;
-        if(y<34){if(x>width_-34)return -2;if(x>width_-68)return -3;if(x>width_-102)return -4;if(x>=width_-140&&x<width_-110)return -5;if(x>=width_-174&&x<width_-144)return -13;if(x>=width_-208&&x<width_-178)return -16;return -99;}
+        if(y<32){if(x>width_-32)return -2;if(x>width_-64)return -3;if(x>width_-96)return -4;if(x>=width_-132&&x<width_-100)return -5;if(x>=width_-168&&x<width_-136)return -13;if(x>=width_-204&&x<width_-172)return -16;return -99;}
         if(settingsOpen()){float l=paneX(),t=paneY();
             if(dropdown_){float dy=dropdownY(),count=float(dropdownCount());if(x>=l+20&&x<=l+420&&y>=dy&&y<dy+count*28)return 10000+int((y-dy)/28);return -20;}
             if(x<l||x>l+440||y<t||y>t+paneHeight())return -19;
@@ -102,12 +94,12 @@ class Application {
             return -99;
         }
         if(x>=width_-18&&y>=Top&&y<listBottom()&&listContent()>listBottom()-Top)return -30;
-        if(y>=Top&&y<listBottom()){int row=int((y-Top+rowScroll_)/RowHeight);if(row>=0&&row<int(state_.rows.size())){if(x>=width_-56&&x<width_-24)return 1000+row;if(x>=width_-90&&x<width_-58)return 3000+row;if(x>=width_-148&&x<width_-96)return row;if(x>=20&&x<=width_-20)return 5000+row;}}
+        if(y>=Top&&y<listBottom()){int row=int((y-Top+rowScroll_)/RowHeight);if(row>=0&&row<int(state_.rows.size())){if(x>=width_-56&&x<width_-20)return 1000+row;if(x>=width_-90&&x<width_-56)return 3000+row;if(x>=width_-148&&x<width_-96)return row;}}
         return -99;
     }
     void openSettings(int row){if(row<0||row>=int(state_.rows.size()))return;auto&r=state_.rows[row];settingsIndex_=r.index;settingsName_=r.name;draft_=r.config;quickMode_=false;deviceReset_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
     void openQuick(int row){if(row<0||row>=int(state_.rows.size()))return;auto&r=state_.rows[row];settingsIndex_=r.index;settingsName_=r.name;quickMode_=true;quickDraft_=r.quick;SetWindowTextW(idsEdit_,ldcontrol::idsText(quickDraft_.ids).c_str());settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
-    void openGlobalSettings(){settingsIndex_=-2;quickMode_=false;globalReset_=false;globalTab_=0;planScroll_=0;settingsName_=L"Cấu Hình Chung";draft_=state_.global.defaults;draftDelay_=state_.global.settleSeconds;draftTargets_=state_.global.playTargets;SetWindowTextW(playDelayEdit_,std::to_wstring(state_.global.playDelaySeconds).c_str());applyToRunning_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
+    void openGlobalSettings(){settingsIndex_=-2;quickMode_=false;globalReset_=false;globalTab_=0;planScroll_=0;settingsName_=L"Cấu Hình";draft_=state_.global.defaults;draftDelay_=state_.global.settleSeconds;draftTargets_=state_.global.playTargets;SetWindowTextW(playDelayEdit_,std::to_wstring(state_.global.playDelaySeconds).c_str());applyToRunning_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
     void action(int id){
         if(id==-2){PostMessageW(window_,WM_CLOSE,0,0);return;}if(id==-3){ShowWindow(window_,IsZoomed(window_)?SW_RESTORE:SW_MAXIMIZE);return;}if(id==-4){ShowWindow(window_,SW_MINIMIZE);return;}if(engine_.failure())return;if(id==-5){engine_.refresh();return;}
         if(id==-13){openGlobalSettings();return;}
@@ -127,97 +119,68 @@ class Application {
         }
         if(id>=3000&&id<3512){openQuick(id-3000);return;}if(id>=1000&&id<1512){openSettings(id-1000);return;}if(id>=0&&id<int(state_.rows.size())){focus_=id;engine_.toggle(state_.rows[id].index);}
     }
-    void drawDropdown(){if(!dropdown_)return;float l=paneX(),y=dropdownY();int count=dropdownCount();fill(l+20,y,l+420,y+count*28,UI::Header,6);stroke(l+20,y,l+420,y+count*28,UI::BorderLight,6);for(int i=0;i<count;i++){if(i==dropSelection_||hover_==10000+i)fill(l+23,y+i*28+2,l+417,y+(i+1)*28-2,UI::Accent,4);text(dropdown_==1?std::wstring(quickMode_?UI::QuickFunctions[i]:UI::Functions[i]):dropdown_==2?std::wstring(UI::Filters[i]):std::to_wstring(UI::Delays[i])+L" giây",l+32,y+i*28,370,28,UI::Text);}}
+    void drawDropdown(){if(!dropdown_)return;float l=paneX(),y=dropdownY();int count=dropdownCount();fill(l+20,y,l+420,y+count*28,UI::Panel,5);stroke(l+20,y,l+420,y+count*28,UI::Border,5);for(int i=0;i<count;i++){if(i==dropSelection_||hover_==10000+i)fill(l+22,y+i*28+1,l+418,y+(i+1)*28-1,UI::Accent,3);text(dropdown_==1?std::wstring(quickMode_?UI::QuickFunctions[i]:UI::Functions[i]):dropdown_==2?std::wstring(UI::Filters[i]):std::to_wstring(UI::Delays[i])+L" giây",l+32,y+i*28,370,28,UI::Text);}}
     void settingsDraw(){
-        float l=paneX(),t=paneY();fill(0,34,width_,height_,0x05070b,0,.76f);fill(l,t,l+440,t+paneHeight(),UI::Panel,10);stroke(l,t,l+440,t+paneHeight(),UI::BorderLight,10);
-        fill(l,t,l+440,t+46,UI::Header,10);fill(l,t+38,l+440,t+46,UI::Header);fill(l+1,t+46,l+439,t+47,UI::Border);
-        text(settingsName_,l+20,t+9,290,30,UI::Text,bold_);
-        if(!quickMode_){if(!globalSettings()||!planTab()){const bool hot=hover_==-7;fill(l+324,t+9,l+352,t+37,hot?0x3a1822:UI::Panel,6);stroke(l+324,t+9,l+352,t+37,hot?UI::Red:UI::Border,6);glyph(L"\uE72C",l+324,t+9,28,28,UI::Red);}else iconButton(-7,L"\uE72C",l+324,t+9);iconButton(-8,L"\uE74E",l+360,t+9);}iconButton(-6,L"\uE8BB",l+396,t+9);
+        float l=paneX(),t=paneY();fill(0,32,width_,height_,0x000000,0,.78f);fill(l,t,l+440,t+paneHeight(),UI::Panel,9);stroke(l,t,l+440,t+paneHeight(),UI::Border,9);
+        text(settingsName_,l+20,t+10,290,30,UI::Text,bold_);
+        if(!quickMode_){if(!globalSettings()||!planTab()){if(hover_==-7)fill(l+324,t+10,l+354,t+40,0x301018,5);glyph(L"\uE72C",l+324,t+10,30,30,UI::Red);}else iconButton(-7,L"\uE72C",l+324,t+10);iconButton(-8,L"\uE74E",l+360,t+10);}iconButton(-6,L"\uE8BB",l+396,t+10);
         if(quickMode_){
-            text(L"Chức Năng Rời",l+20,t+52,400,22,UI::Muted,small_);fill(l+20,t+76,l+420,t+108,UI::Field,6);stroke(l+20,t+76,l+420,t+108,hover_==-9?UI::Accent:UI::Border,6);text(UI::QuickFunctions[quickDraft_.function==14?2:quickDraft_.function==1?1:0],l+32,t+76,350,32,UI::Text);glyph(L"\uE70D",l+388,t+76,24,32,UI::Accent);
-            if(quickDraft_.function){text(quickDraft_.function==1?L"ID Cá (cách nhau bằng dấu phẩy)":L"Danh sách ID",l+20,t+116,400,22,UI::Muted,small_);fill(l+20,t+140,l+420,t+172,UI::Field,6);stroke(l+20,t+140,l+420,t+172,UI::BorderLight,6);}
+            text(L"Chức Năng",l+20,t+50,400,24,UI::Muted,small_);fill(l+20,t+76,l+420,t+108,UI::Background,5);stroke(l+20,t+76,l+420,t+108,UI::Border,5);text(UI::QuickFunctions[quickDraft_.function==14?2:quickDraft_.function==1?1:0],l+32,t+76,350,32,UI::Text);glyph(L"\uE70D",l+388,t+76,24,32,UI::Accent);
+            if(quickDraft_.function){text(quickDraft_.function==1?L"ID Cá":L"ID",l+20,t+114,400,24,UI::Muted,small_);fill(l+20,t+140,l+420,t+172,UI::Background,5);stroke(l+20,t+140,l+420,t+172,UI::Border,5);}
             if(quickDraft_.function==1){text(L"BÁN NHANH",l+20,t+204,320,32,UI::Text,bold_);toggleDraw(l+384,t+211,quickDraft_.sell);}
-            fill(l+20,t+256,l+420,t+288,hover_==-50?UI::AccentHover:UI::Accent,6);glyph(L"\uE768",l+205,t+256,30,32,UI::Text);
+            fill(l+20,t+256,l+420,t+288,hover_==-50?0xc454ff:UI::Accent,5);glyph(L"\uE768",l+205,t+256,30,32,UI::Text);
             if(!settingsError_.empty())text(settingsError_,l+20,t+298,400,30,UI::Red,small_);drawDropdown();return;
         }
-        if(globalSettings()){fill(l+20,t+52,l+420,t+80,UI::Field,6);stroke(l+20,t+52,l+420,t+80,UI::Border,6);for(int tab=0;tab<2;tab++){float x=l+22+tab*198;bool selected=globalTab_==tab;if(selected)fill(x,t+54,x+198,t+78,UI::Accent,5);else if(hover_==-40-tab)fill(x,t+54,x+198,t+78,UI::Hover,5);text(tab?L"Mặc Định LD":L"Danh Sách Play",x,t+52,198,28,selected?UI::Text:UI::Muted,bold_,DWRITE_TEXT_ALIGNMENT_CENTER);}}
+        if(globalSettings())for(int tab=0;tab<2;tab++){float x=l+20+tab*200;bool selected=globalTab_==tab;if(selected||hover_==-40-tab)fill(x,t+48,x+200,t+78,UI::Hover,4);text(tab?L"Cấu Hình LD":L"Cấu Hình Chung",x,t+48,200,30,selected?UI::Accent:UI::Muted,bold_,DWRITE_TEXT_ALIGNMENT_CENTER);if(selected)fill(x+20,t+76,x+180,t+78,UI::Accent);}
         if(planTab()){
-            text(L"Áp Dụng Cho:",l+20,t+88,190,24,UI::Muted,small_);text(L"Delay Giữa Các LD (giây):",l+230,t+88,190,24,UI::Muted,small_);fill(l+230,t+118,l+420,t+150,UI::Field,6);stroke(l+230,t+118,l+420,t+150,UI::BorderLight,6);
-            bool all=!state_.rows.empty()&&std::all_of(state_.rows.begin(),state_.rows.end(),[&](auto&r){return targetSelected(r);});checkDraw(l+26,t+121,all);text(L"Chọn tất cả",l+50,t+116,150,24,UI::Text,bold_);
-            fill(l+20,t+142,l+212,t+350,UI::Field,6);stroke(l+20,t+142,l+212,t+350,UI::Border,6);
-            target_->PushAxisAlignedClip(D2D1::RectF(l+22,t+144,l+210,t+348),D2D1_ANTIALIAS_MODE_ALIASED);
-            for(size_t i=0;i<state_.rows.size();i++){float y=t+144+float(i)*20-planScroll_;if(y+20<=t+144||y>=t+348)continue;if(hover_==20000+int(i))fill(l+24,y,l+208,y+20,UI::Hover,4);checkDraw(l+28,y+3,targetSelected(state_.rows[i]));text(state_.rows[i].name,l+52,y,150,20,UI::Text);}
-            if(state_.rows.empty())text(L"Chưa có LD đang mở",l+30,t+152,175,30,UI::Muted,small_);target_->PopAxisAlignedClip();
-            float content=float(state_.rows.size())*20;if(content>204&&scrollVisible_==3){float thumb=std::max(22.f,204*204/content),y=t+144+(204-thumb)*planScroll_/(content-204);fill(l+206,y,l+210,y+thumb,UI::Accent,2);}
+            text(L"Áp Dụng Cho:",l+20,t+86,190,26,UI::Text);text(L"Delay Giữa Các LD (s):",l+230,t+86,190,26,UI::Text);fill(l+230,t+118,l+420,t+150,UI::Background,4);stroke(l+230,t+118,l+420,t+150,UI::Border,4);
+            bool all=!state_.rows.empty()&&std::all_of(state_.rows.begin(),state_.rows.end(),[&](auto&r){return targetSelected(r);});checkDraw(l+26,t+121,all);text(L"All",l+52,t+116,150,24,UI::Text,bold_);
+            target_->PushAxisAlignedClip(D2D1::RectF(l+20,t+142,l+210,t+350),D2D1_ANTIALIAS_MODE_ALIASED);
+            for(size_t i=0;i<state_.rows.size();i++){float y=t+142+float(i)*20-planScroll_;if(y+20<=t+142||y>=t+350)continue;if(hover_==20000+int(i))fill(l+20,y,l+210,y+20,UI::Hover,3);checkDraw(l+26,y+3,targetSelected(state_.rows[i]));text(state_.rows[i].name,l+52,y,150,20,UI::Text);}
+            if(state_.rows.empty())text(L"Chưa có LD đang mở",l+26,t+148,180,30,UI::Muted,small_);target_->PopAxisAlignedClip();
+            float content=float(state_.rows.size())*20;if(content>208&&scrollVisible_==3){float thumb=std::max(22.f,208*208/content),y=t+142+(208-thumb)*planScroll_/(content-208);fill(l+206,y,l+210,y+thumb,UI::Accent,2);}
             if(!settingsError_.empty())text(settingsError_,l+20,t+354,400,28,UI::Red,small_);return;
         }
-        for(int field=1;field<=2;field++){float y=t+fieldY(field);const bool hot=hover_==(field==1?-9:-10);text(field==1?L"Chức Năng":L"Lọc Bọ",l+20,y-24,400,22,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Field,6);stroke(l+20,y,l+420,y+32,hot?UI::Accent:UI::Border,6);text(field==1?UI::Functions[functionSelection()]:UI::Filters[draft_.filter],l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);}
-        if(globalSettings()){float y=t+fieldY(3);text(L"Chờ Sau Kết Nối",l+20,y-24,400,22,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Field,6);stroke(l+20,y,l+420,y+32,hover_==-14?UI::Accent:UI::Border,6);text(std::to_wstring(draftDelay_)+L" giây",l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);text(L"Áp Dụng Cho LD Đang Mở",l+20,t+322,350,28,UI::Text);toggleDraw(l+384,t+327,applyToRunning_);}
+        for(int field=1;field<=2;field++){float y=t+fieldY(field);text(field==1?L"Chức Năng":L"Lọc Bọ",l+20,y-26,400,24,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Background,5);stroke(l+20,y,l+420,y+32,UI::Border,5);text(field==1?UI::Functions[functionSelection()]:UI::Filters[draft_.filter],l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);}
+        if(globalSettings()){float y=t+fieldY(3);text(L"Chờ Sau Kết Nối",l+20,y-26,400,24,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Background,5);stroke(l+20,y,l+420,y+32,UI::Border,5);text(std::to_wstring(draftDelay_)+L" giây",l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);text(L"Áp Dụng Cho LD Đang Mở",l+20,t+322,350,28,UI::Text);toggleDraw(l+384,t+327,applyToRunning_);}
         const float cy=t+controlsY();text(L"RECONNECT",l+20,cy,140,32,UI::Text,bold_);toggleDraw(l+169,cy+7,draft_.reconnect);text(L"BÁN",l+245,cy,100,32,UI::Text,bold_);toggleDraw(l+384,cy+7,draft_.sell);
-        if(!settingsError_.empty())text(settingsError_,l+20,t+paneHeight()-40,400,26,UI::Red,small_);
+        if(!settingsError_.empty())text(settingsError_,l+20,t+paneHeight()-42,400,26,UI::Red,small_);
         drawDropdown();
     }
     void draw(){
         if(engine_.failure()||IsIconic(window_)||FAILED(resources()))return;
         if(!ramTotal_)updateRam(false);
         target_->BeginDraw();target_->Clear(rgb(UI::Background));
-        fill(0,0,width_,34,UI::Header);fill(0,33,width_,34,UI::Border);
-        text(L"LDMenu",18,0,72,33,UI::Text,bold_);
-        if(ramTotal_){
-            const std::wstring ramText=std::to_wstring(ramUsed_)+L"/"+std::to_wstring(ramTotal_)+L" GB";
-            const unsigned ramColor=ramLoad_>=88?UI::Red:ramLoad_>=75?UI::Amber:UI::Green;
-            fill(86,6,174,27,UI::Panel,6);stroke(86,6,174,27,UI::Border,6);
-            dot(97,16.5f,3.5f,ramColor);
-            text(ramText,106,6,64,21,UI::Text,small_);
-        }
-        if(!state_.rows.empty()){
-            size_t conn=0;for(const auto&r:state_.rows)if(r.phase==ldcontrol::Phase::Connected)conn++;
-            const std::wstring summary=std::to_wstring(conn)+L"/"+std::to_wstring(state_.rows.size())+L" Kết nối";
-            fill(182,6,274,27,UI::Panel,6);stroke(182,6,274,27,UI::Border,6);
-            dot(193,16.5f,3.5f,conn?UI::Green:UI::Muted);
-            text(summary,202,6,68,21,conn?UI::Text:UI::Muted,small_);
-        }
-        for(int i=0;i<3;i++){int id=-4+i;float x=width_-102+i*34;if(hover_==id)fill(x,0,x+34,33,id==-2?UI::CloseRed:UI::Hover);glyph(i==0?L"\uE921":i==1?(IsZoomed(window_)?L"\uE923":L"\uE922"):L"\uE8BB",x,0,34,33,UI::Text,true);}
-        fill(width_-105,8,width_-104,26,UI::Border);
-        iconButton(-5,L"\uE72C",width_-140,3,28);
-        iconButton(-13,L"\uE713",width_-174,3,28);
-        playButton(width_-208,3);
-        target_->PushAxisAlignedClip(D2D1::RectF(18,Top,width_-16,listBottom()),D2D1_ANTIALIAS_MODE_ALIASED);
-        for(size_t i=0;i<state_.rows.size();i++){auto&r=state_.rows[i];float y=Top+float(i)*RowHeight-rowScroll_,h=RowHeight-4;if(y+RowHeight<=Top||y>=listBottom())continue;
-            const bool rowHot=hover_==5000+int(i)||hover_==int(i)||hover_==1000+int(i)||hover_==3000+int(i);
-            const unsigned statusColor=r.phase==ldcontrol::Phase::Connected?UI::Green:r.phase==ldcontrol::Phase::Failed?UI::Red:r.wanted?UI::Amber:UI::Muted;
-            fill(20,y,width_-20,y+h,rowHot?UI::PanelHover:UI::Panel,6);
-            stroke(20,y,width_-20,y+h,rowHot?UI::BorderLight:UI::Border,6);
-            if(r.wanted||r.phase==ldcontrol::Phase::Connected)fill(20,y+5,23.5f,y+h-5,r.phase==ldcontrol::Phase::Connected?UI::Green:UI::Accent,1.7f);
-            text(r.name,34,y,118,h,UI::Text,bold_);
-            const std::wstring tag=rowTag(r);
-            const bool activeTag=tag!=L"OFF";
-            fill(154,y+5,274,y+h-5,activeTag?UI::Hover:UI::Field,5,activeTag?.85f:.7f);
-            stroke(154,y+5,274,y+h-5,activeTag?UI::Accent:UI::Border,5,activeTag?.45f:.6f);
-            text(tag,160,y+5,108,h-10,activeTag?UI::Text:UI::Muted,small_,DWRITE_TEXT_ALIGNMENT_CENTER);
-            fill(282,y+5,396,y+h-5,statusColor,5,.13f);
-            stroke(282,y+5,396,y+h-5,statusColor,5,.35f);
-            dot(293,y+h/2,3.5f,statusColor);
-            text(ldcontrol::phaseText(r.phase),302,y+5,88,h-10,statusColor==UI::Muted?UI::Text:statusColor,small_);
-            if(r.phase!=ldcontrol::Phase::Idle)text(r.detail,406,y,width_-564,h,UI::Muted,small_);
-            toggleDraw(width_-144,y+6,r.wanted);iconButton(3000+int(i),L"\uE945",width_-88,y+1,28);iconButton(1000+int(i),L"\uE713",width_-54,y+1,28);
+        text(L"LDMenu",18,0,66,32,UI::Text,bold_);
+        if(ramTotal_)text(std::to_wstring(ramUsed_)+L"/"+std::to_wstring(ramTotal_)+L" GB",84,0,110,32,UI::Muted,small_);
+        fill(0,31,width_,32,UI::Border);
+        for(int i=0;i<3;i++){int id=-4+i;float x=width_-96+i*32;if(hover_==id)fill(x,0,x+32,31,UI::Accent);glyph(i==0?L"\uE921":i==1?(IsZoomed(window_)?L"\uE923":L"\uE922"):L"\uE8BB",x,0,32,31,UI::Text,true);}
+        iconButton(-5,L"\uE72C",width_-132,1,30);
+        iconButton(-13,L"\uE713",width_-168,1,30);
+        playButton(width_-204,1);
+        target_->PushAxisAlignedClip(D2D1::RectF(20,Top,width_-18,listBottom()),D2D1_ANTIALIAS_MODE_ALIASED);
+        for(size_t i=0;i<state_.rows.size();i++){auto&r=state_.rows[i];float y=Top+float(i)*RowHeight-rowScroll_;if(y+RowHeight<=Top||y>=listBottom())continue;
+            fill(20,y,width_-20,y+RowHeight-3,UI::Panel,5);text(r.name,34,y,180,RowHeight-3,UI::Text,bold_);
+            unsigned c=r.phase==ldcontrol::Phase::Connected?UI::Green:r.phase==ldcontrol::Phase::Failed?UI::Red:r.wanted?UI::Amber:UI::Text;
+            text(ldcontrol::phaseText(r.phase),230,y,130,RowHeight-3,c,small_);if(r.phase!=ldcontrol::Phase::Idle)text(r.detail,367,y,width_-543,RowHeight-3,UI::Muted,small_);
+            toggleDraw(width_-142,y+5,r.wanted);iconButton(3000+int(i),L"\uE945",width_-88,y,28);iconButton(1000+int(i),L"\uE713",width_-54,y,28);
         }
         if(state_.rows.empty())text(state_.scanning?L"Đang đọc danh sách LDPlayer...":L"Chưa có LDPlayer đang mở",34,Top+12,width_-100,36,UI::Muted);
         target_->PopAxisAlignedClip();scrollbar(1,Top,listBottom(),listContent(),rowScroll_);
-        if(!state_.error.empty())text(state_.error,24,height_-34,width_-48,22,UI::Red,small_);
+        if(!state_.error.empty())text(state_.error,24,height_-36,width_-48,24,UI::Red,small_);
         if(settingsOpen())settingsDraw();
         auto hr=target_->EndDraw();if(hr==D2DERR_RECREATE_TARGET)discard();
     }
     void startDrag(float y){const float visible=listBottom()-Top,content=listContent();if(content<=visible)return;dragScroll_=1;dragY_=y;float thumb=std::max(22.f,visible*visible/content),thumbTop=Top+(visible-thumb)*rowScroll_/(content-visible);if(y<thumbTop||y>thumbTop+thumb)rowScroll_=std::clamp((y-Top-thumb/2)/(visible-thumb),0.f,1.f)*(content-visible);dragStart_=rowScroll_;SetCapture(window_);showScroll(1);}
     LRESULT message(UINT m,WPARAM p,LPARAM l){switch(m){
         case WM_NCCALCSIZE:if(p)return 0;break;
-        case WM_NCHITTEST:{POINT pt{GET_X_LPARAM(l),GET_Y_LPARAM(l)};ScreenToClient(window_,&pt);RECT r;GetClientRect(window_,&r);int b=IsZoomed(window_)?0:6;bool left=pt.x<b,right=pt.x>=r.right-b,top=pt.y<b,bottom=pt.y>=r.bottom-b;if(top&&left)return HTTOPLEFT;if(top&&right)return HTTOPRIGHT;if(bottom&&left)return HTBOTTOMLEFT;if(bottom&&right)return HTBOTTOMRIGHT;if(left)return HTLEFT;if(right)return HTRIGHT;if(top)return HTTOP;if(bottom)return HTBOTTOM;float x=pt.x*96.f/dpi_,y=pt.y*96.f/dpi_;return y<34&&x<width_-212?HTCAPTION:HTCLIENT;}
+        case WM_NCHITTEST:{POINT pt{GET_X_LPARAM(l),GET_Y_LPARAM(l)};ScreenToClient(window_,&pt);RECT r;GetClientRect(window_,&r);int b=IsZoomed(window_)?0:6;bool left=pt.x<b,right=pt.x>=r.right-b,top=pt.y<b,bottom=pt.y>=r.bottom-b;if(top&&left)return HTTOPLEFT;if(top&&right)return HTTOPRIGHT;if(bottom&&left)return HTBOTTOMLEFT;if(bottom&&right)return HTBOTTOMRIGHT;if(left)return HTLEFT;if(right)return HTRIGHT;if(top)return HTTOP;if(bottom)return HTBOTTOM;float x=pt.x*96.f/dpi_,y=pt.y*96.f/dpi_;return y<32&&x<width_-208?HTCAPTION:HTCLIENT;}
         case WM_GETMINMAXINFO:{auto*info=reinterpret_cast<MINMAXINFO*>(l);info->ptMinTrackSize={LONG(800*dpi_/96),LONG(450*dpi_/96)};MONITORINFO mi{};mi.cbSize=sizeof(mi);if(GetMonitorInfoW(MonitorFromWindow(window_,MONITOR_DEFAULTTONEAREST),&mi)){LONG w=mi.rcWork.right-mi.rcWork.left,h=mi.rcWork.bottom-mi.rcWork.top;if(w*9>h*16)w=h*16/9;else h=w*9/16;info->ptMaxSize={w,h};info->ptMaxPosition={(mi.rcWork.left-mi.rcMonitor.left)+(mi.rcWork.right-mi.rcWork.left-w)/2,(mi.rcWork.top-mi.rcMonitor.top)+(mi.rcWork.bottom-mi.rcWork.top-h)/2};}return 0;}
         case WM_SIZING:{auto*r=reinterpret_cast<RECT*>(l);LONG w=r->right-r->left,h=r->bottom-r->top;if(p==WMSZ_TOP||p==WMSZ_BOTTOM){w=LONG(std::lround(h*16.0/9));r->right=r->left+w;}else{h=LONG(std::lround(w*9.0/16));if(p==WMSZ_TOPLEFT||p==WMSZ_TOPRIGHT)r->top=r->bottom-h;else r->bottom=r->top+h;}return TRUE;}
         case WM_SIZE:width_=LOWORD(l)*96.f/dpi_;height_=HIWORD(l)*96.f/dpi_;if(p==SIZE_MINIMIZED){discard();if(playDelayEdit_)ShowWindow(playDelayEdit_,SW_HIDE);if(idsEdit_)ShowWindow(idsEdit_,SW_HIDE);}else{if(target_)target_->Resize(D2D1::SizeU(LOWORD(l),HIWORD(l)));layoutEditor();}clamp();engine_.setBackground(p==SIZE_MINIMIZED);invalidate();return 0;
         case WM_DPICHANGED:{dpi_=float(HIWORD(p));if(target_)target_->SetDpi(dpi_,dpi_);auto*r=reinterpret_cast<RECT*>(l);SetWindowPos(window_,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOACTIVATE|SWP_NOZORDER);invalidate();return 0;}
         case WM_ERASEBKGND:return 1;
-        case WM_CTLCOLOREDIT:if(reinterpret_cast<HWND>(l)==playDelayEdit_||reinterpret_cast<HWND>(l)==idsEdit_){SetTextColor(reinterpret_cast<HDC>(p),RGB(0xf0,0xf4,0xfc));SetBkColor(reinterpret_cast<HDC>(p),RGB(0x0d,0x11,0x18));return reinterpret_cast<LRESULT>(editBrush_?editBrush_:GetStockObject(BLACK_BRUSH));}break;
+        case WM_CTLCOLOREDIT:if(reinterpret_cast<HWND>(l)==playDelayEdit_||reinterpret_cast<HWND>(l)==idsEdit_){SetTextColor(reinterpret_cast<HDC>(p),RGB(255,255,255));SetBkColor(reinterpret_cast<HDC>(p),RGB(0,0,0));return reinterpret_cast<LRESULT>(GetStockObject(BLACK_BRUSH));}break;
         case WM_NCPAINT:return 0;
         case WM_NCACTIVATE:return DefWindowProcW(window_,m,p,-1);
         case WM_ACTIVATE:invalidate();return DefWindowProcW(window_,m,p,l);
@@ -239,16 +202,15 @@ class Application {
         case WM_DESTROY:PostQuitMessage(0);return 0;
     }return DefWindowProcW(window_,m,p,l);}
 public:
-    ~Application(){engine_.stop();discard();release(playShape_);if(editFont_)DeleteObject(editFont_);if(editBrush_)DeleteObject(editBrush_);release(caption_);release(icon_);release(bold_);release(small_);release(font_);release(writeFactory_);release(factory_);}
+    ~Application(){engine_.stop();discard();release(playShape_);if(editFont_)DeleteObject(editFont_);release(caption_);release(icon_);release(bold_);release(small_);release(font_);release(writeFactory_);release(factory_);}
     bool initialize(HINSTANCE instance){
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&factory_))||FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(&writeFactory_))))return false;
         auto font=[&](float size,DWRITE_FONT_WEIGHT weight,IDWriteTextFormat**out,const wchar_t*name=L"Segoe UI"){auto hr=writeFactory_->CreateTextFormat(name,nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size,L"vi-VN",out);if(SUCCEEDED(hr)){(*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);(*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);}return SUCCEEDED(hr);};
-        if(!font(13,DWRITE_FONT_WEIGHT_NORMAL,&font_)||!font(11.5f,DWRITE_FONT_WEIGHT_MEDIUM,&small_)||!font(13,DWRITE_FONT_WEIGHT_SEMI_BOLD,&bold_)||!font(14,DWRITE_FONT_WEIGHT_NORMAL,&icon_,L"Segoe MDL2 Assets")||!font(10,DWRITE_FONT_WEIGHT_NORMAL,&caption_,L"Segoe MDL2 Assets"))return false;
+        if(!font(13,DWRITE_FONT_WEIGHT_NORMAL,&font_)||!font(11,DWRITE_FONT_WEIGHT_NORMAL,&small_)||!font(13,DWRITE_FONT_WEIGHT_SEMI_BOLD,&bold_)||!font(14,DWRITE_FONT_WEIGHT_NORMAL,&icon_,L"Segoe MDL2 Assets")||!font(10,DWRITE_FONT_WEIGHT_NORMAL,&caption_,L"Segoe MDL2 Assets"))return false;
         if(FAILED(factory_->CreatePathGeometry(&playShape_)))return false;ID2D1GeometrySink*sink=nullptr;if(FAILED(playShape_->Open(&sink)))return false;sink->BeginFigure(D2D1::Point2F(8.5f,7.2f),D2D1_FIGURE_BEGIN_FILLED);sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(8.5f,5.6f),D2D1::Point2F(9.7f,5),D2D1::Point2F(11.1f,5.8f)));sink->AddLine(D2D1::Point2F(22,12.6f));sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(23.4f,13.4f),D2D1::Point2F(23.4f,15),D2D1::Point2F(22,15.8f)));sink->AddLine(D2D1::Point2F(11.1f,22.6f));sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(9.7f,23.4f),D2D1::Point2F(8.5f,22.8f),D2D1::Point2F(8.5f,21.2f)));sink->AddLine(D2D1::Point2F(8.5f,7.2f));sink->EndFigure(D2D1_FIGURE_END_CLOSED);const auto shapeResult=sink->Close();sink->Release();if(FAILED(shapeResult))return false;
         WNDCLASSEXW cls{};cls.cbSize=sizeof(cls);cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.hCursor=LoadCursor(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));cls.hIconSm=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));cls.lpszClassName=L"LDMenu.Direct2D";if(!RegisterClassExW(&cls))return false;
         dpi_=float(GetDpiForSystem());RECT work;SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);int w=std::min(int(800*dpi_/96),int(work.right-work.left-40)),h=int(std::lround(w*9.0/16));if(h>work.bottom-work.top-50){h=int(work.bottom-work.top-50);w=int(std::lround(h*16.0/9));}
         window_=CreateWindowExW(0,cls.lpszClassName,L"LDMenu",WS_POPUP|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU|WS_CLIPCHILDREN,work.left+(work.right-work.left-w)/2,work.top+(work.bottom-work.top-h)/2,w,h,nullptr,nullptr,instance,this);if(!window_)return false;
-        editBrush_=CreateSolidBrush(RGB(0x0d,0x11,0x18));
         playDelayEdit_=CreateWindowExW(0,L"EDIT",L"5",WS_CHILD|WS_TABSTOP|ES_NUMBER|ES_AUTOHSCROLL|ES_RIGHT,0,0,100,24,window_,reinterpret_cast<HMENU>(420),instance,nullptr);if(!playDelayEdit_)return false;SetWindowLongPtrW(playDelayEdit_,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(this));editProcedure_=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(playDelayEdit_,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(editProcedure)));editFont_=CreateFontW(-int(13*dpi_/96),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");SendMessageW(playDelayEdit_,WM_SETFONT,reinterpret_cast<WPARAM>(editFont_),TRUE);SendMessageW(playDelayEdit_,EM_SETLIMITTEXT,4,0);
         idsEdit_=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_TABSTOP|ES_AUTOHSCROLL,0,0,100,24,window_,reinterpret_cast<HMENU>(421),instance,nullptr);if(!idsEdit_)return false;SetWindowLongPtrW(idsEdit_,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(this));SetWindowLongPtrW(idsEdit_,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(editProcedure));SendMessageW(idsEdit_,WM_SETFONT,reinterpret_cast<WPARAM>(editFont_),TRUE);SendMessageW(idsEdit_,EM_SETLIMITTEXT,1024,0);SendMessageW(idsEdit_,0x1501,TRUE,reinterpret_cast<LPARAM>(L"Để trống: không lọc ID"));
         int dark=1;DwmSetWindowAttribute(window_,20,&dark,sizeof(dark));int corners=2;DwmSetWindowAttribute(window_,33,&corners,sizeof(corners));DWORD border=0xfffffffe;DwmSetWindowAttribute(window_,34,&border,sizeof(border));DWMNCRENDERINGPOLICY nc=DWMNCRP_DISABLED;DwmSetWindowAttribute(window_,DWMWA_NCRENDERING_POLICY,&nc,sizeof(nc));
