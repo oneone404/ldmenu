@@ -27,13 +27,13 @@ struct Row {
     bool running=false,wanted=false,playQueued=false,automatic=false; Phase phase=Phase::Idle;
     unsigned restarts=0,misses=0,probeErrors=0; unsigned long long generation=0,base=0;
     Config config;unsigned long long applyAt=0,revision=0;
-    std::string bootId,startTicks;bool useSu=false;
+    std::string bootId,startTicks;bool rootReady=false;
     unsigned long long retryAt=0;
     std::array<ULONGLONG,5> restartTimes{};
     Intent intent=Intent::Automatic;QuickConfig quick;bool actionPending=false;int quickActive=0;
 };
 struct Snapshot { std::vector<Row> rows; std::wstring error; bool scanning=false,playRunning=false,playStopping=false; GlobalSettings global; };
-struct Job { int index; std::wstring name; std::string bootId,startTicks; unsigned long long generation; bool features=false,batch=false,useSu=false,recovery=false,loaded=false; std::atomic<bool> cancelled{false}; };
+struct Job { int index; std::wstring name; std::string bootId,startTicks; unsigned long long generation; bool features=false,batch=false,rootReady=false,recovery=false,loaded=false; std::atomic<bool> cancelled{false}; };
 class Engine {
 public:
     Engine(); ~Engine();
@@ -67,15 +67,15 @@ private:
     void report(const std::shared_ptr<Job>& job,Phase phase,const std::wstring& detail,DWORD game=0,unsigned long long base=0);
     bool cancelled(const std::shared_ptr<Job>& job); bool wait(DWORD ms,const std::shared_ptr<Job>& job={});
     bool command(bool adb,const std::wstring& args,std::string& output,const std::shared_ptr<Job>& job={},DWORD timeout=10000);
-    bool shell(const std::shared_ptr<Job>& job,const std::wstring& text,std::string& output,DWORD timeout=10000,bool privileged=true);
+    bool shell(const std::shared_ptr<Job>& job,const std::wstring& text,std::string& output,DWORD timeout=10000);
     bool fresh(const std::shared_ptr<Job>& job,Row& row);
     bool ensureAdb(const std::shared_ptr<Job>& job);
     bool ensureRoot(const std::shared_ptr<Job>& job);
-    bool context(const std::shared_ptr<Job>& job,DWORD& pid,unsigned long long& base);
-    ContextState inspectContext(const std::shared_ptr<Job>& job,DWORD& pid,unsigned long long& base);
+    bool context(const std::shared_ptr<Job>& job,DWORD& pid,unsigned long long& base,std::string* mapsOut=nullptr,std::string* ticksOut=nullptr);
+    ContextState inspectContext(const std::shared_ptr<Job>& job,DWORD& pid,unsigned long long& base,std::string* mapsOut=nullptr,std::string* ticksOut=nullptr);
     bool openGame(const std::shared_ptr<Job>& job);
     bool restart(const std::shared_ptr<Job>& job,const Row& old);
-    void connected(const std::shared_ptr<Job>& job,DWORD pid,unsigned long long base);
+    void connected(const std::shared_ptr<Job>& job,DWORD pid,unsigned long long base,const std::string& verifiedTicks={});
     bool controlMatches(const std::shared_ptr<Job>& job,DWORD pid,unsigned long long base,const Config& config,bool& known);
     void apply(const std::shared_ptr<Job>& job,const Row& row);
     void runtimeAction(const std::shared_ptr<Job>& job,Row row);
@@ -84,7 +84,7 @@ private:
     bool readMemory(const std::shared_ptr<Job>& job,const Row& row,unsigned offset,size_t count,std::string& data);
     bool waitFilter(const std::shared_ptr<Job>& job,const Row& row,const std::vector<unsigned>& ids,bool zeroMailbox=false);
     bool applyIds(const std::shared_ptr<Job>& job,const Row& row,const std::vector<unsigned>& ids);
-    bool word(const std::shared_ptr<Job>& job,const Row& row,unsigned relative,unsigned value);
+    bool word(const std::shared_ptr<Job>& job,const Row& row,unsigned relative,unsigned value,bool checkVm=true);
     void notify();
 };
 int tests();

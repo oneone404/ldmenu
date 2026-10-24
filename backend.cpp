@@ -91,7 +91,6 @@ static std::wstring assetPath(const wchar_t*name=L"libmod-arm64.so"){wchar_t exe
 static bool assetHash(const std::wstring&path,const char*expected=Digest){Handle file(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr));if(file.h==INVALID_HANDLE_VALUE)return false;BCRYPT_ALG_HANDLE alg=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;if(BCryptOpenAlgorithmProvider(&alg,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0)return false;bool ok=BCryptCreateHash(alg,&hash,nullptr,0,nullptr,0,0)>=0;std::array<unsigned char,8192> b{};DWORD n=0;while(ok){if(!ReadFile(file.h,b.data(),DWORD(b.size()),&n,nullptr)){ok=false;break;}if(!n)break;ok=BCryptHashData(hash,b.data(),n,0)>=0;}std::array<unsigned char,32> digest{};if(ok)ok=BCryptFinishHash(hash,digest.data(),32,0)>=0;if(hash)BCryptDestroyHash(hash);BCryptCloseAlgorithmProvider(alg,0);char encoded[65];for(unsigned i=0;i<32;i++)std::snprintf(encoded+2*i,3,"%02x",digest[i]);return ok&&std::string(encoded)==expected;}
 static bool commitReady(){PERFORMANCE_INFORMATION p{};p.cb=sizeof(p);return GetPerformanceInfo(&p,sizeof(p))&&p.CommitLimit>p.CommitTotal&&static_cast<unsigned long long>(p.CommitLimit-p.CommitTotal)*p.PageSize>=2ULL*1024*1024*1024;}
 static std::wstring quoteArg(const std::wstring&s){std::wstring out=L"\"";unsigned slashes=0;for(auto c:s){if(c==L'\\'){slashes++;continue;}if(c==L'\"'){out.append(slashes*2+1,L'\\');out+=c;}else{out.append(slashes,L'\\');out+=c;}slashes=0;}out.append(slashes*2,L'\\');return out+L"\"";}
-static std::wstring shellQuote(const std::wstring&s){std::wstring out=L"'";for(auto c:s)out+=c==L'\''?L"'\\''":std::wstring(1,c);return out+L"'";}
 std::wstring phaseText(Phase p){switch(p){case Phase::Idle:return L"Sẵn sàng";case Phase::Queued:return L"Đang chờ";case Phase::Checking:return L"Kiểm tra";case Phase::Repairing:return L"Sửa kết nối";case Phase::Opening:return L"Mở game";case Phase::Loading:return L"Đang kết nối";case Phase::Connected:return L"Thành công";case Phase::Applying:return L"Áp dụng cấu hình";case Phase::WaitingAdb:return L"Chờ ADB";case Phase::WaitingContext:return L"Chờ xác minh";case Phase::Cooldown:return L"Tạm chờ";case Phase::Failed:return L"Thất bại";case Phase::Closed:return L"Đã tắt";}return {};}
 Engine::Engine(){stop_=CreateEventW(nullptr,TRUE,FALSE,nullptr);wake_=CreateEventW(nullptr,FALSE,FALSE,nullptr);}
 Engine::~Engine(){stop();if(stop_)CloseHandle(stop_);if(wake_)CloseHandle(wake_);}
@@ -166,14 +165,13 @@ bool Engine::command(bool adb,const std::wstring&args,std::string&out,const std:
     const wchar_t*exe=adb?Adb:Console;std::wstring cmd=L"\""+std::wstring(exe)+L"\" "+args;STARTUPINFOW si{};si.cb=sizeof(si);si.dwFlags=STARTF_USESTDHANDLES;si.hStdInput=input.h;si.hStdOutput=w;si.hStdError=w;PROCESS_INFORMATION pi{};
     if(!CreateProcessW(exe,cmd.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&si,&pi))return false;Handle process(pi.hProcess),thread(pi.hThread);CommandGuard cleanup{pi.hProcess};CloseHandle(writer.h);writer.h=nullptr;auto deadline=GetTickCount64()+timeout;bool done=false,ok=true;
     HANDLE pending[]={stop_,pi.hProcess};
-    for(;;){if(cancelled(j)||GetTickCount64()>=deadline){ok=false;break;}DWORD avail=0;if(PeekNamedPipe(r,nullptr,0,nullptr,&avail,nullptr)&&avail){char buf[4096];DWORD got=0;if(!ReadFile(r,buf,std::min<DWORD>(avail,sizeof(buf)),&got,nullptr)||out.size()+got>1024*1024){ok=false;break;}out.append(buf,got);continue;}if(WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0){done=true;break;}WaitForMultipleObjects(2,pending,FALSE,20);}
+    for(;;){if(cancelled(j)||GetTickCount64()>=deadline){ok=false;break;}const bool exited=WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0;DWORD avail=0;if(PeekNamedPipe(r,nullptr,0,nullptr,&avail,nullptr)&&avail){char buf[4096];DWORD got=0;if(!ReadFile(r,buf,std::min<DWORD>(avail,sizeof(buf)),&got,nullptr)||out.size()+got>1024*1024){ok=false;break;}out.append(buf,got);continue;}if(exited){done=true;break;}WaitForMultipleObjects(2,pending,FALSE,20);}
     DWORD code=1;if(done)GetExitCodeProcess(pi.hProcess,&code);else{TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,1000);}return ok&&done&&code==0;
 }
-bool Engine::shell(const std::shared_ptr<Job>&j,const std::wstring&text,std::string&out,DWORD timeout,bool privileged){
-    if(j->bootId.empty()){if(j->useSu&&privileged)return false;return command(false,L"adb --index "+std::to_wstring(j->index)+L" --command "+quoteArg(L"shell "+text),out,j,timeout);}
+bool Engine::shell(const std::shared_ptr<Job>&j,const std::wstring&text,std::string&out,DWORD timeout){
+    if(j->bootId.empty())return command(false,L"adb --index "+std::to_wstring(j->index)+L" --command "+quoteArg(L"shell "+text),out,j,timeout);
     const std::wstring boot(j->bootId.begin(),j->bootId.end());const auto guarded=L"test $(cat /proc/sys/kernel/random/boot_id) = "+boot+L" && { "+text+L"; }";
-    const auto remote=j->useSu&&privileged?L"su -c "+shellQuote(guarded):guarded;
-    return command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell "+quoteArg(remote),out,j,timeout);
+    return command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell "+quoteArg(guarded),out,j,timeout);
 }
 bool Engine::fresh(const std::shared_ptr<Job>&j,Row&row){std::string text;std::vector<Row> rows;if(!command(false,L"list2",text,j)||!parseList(text,rows))return false;auto it=std::find_if(rows.begin(),rows.end(),[&](auto&r){return r.index==j->index&&r.name==j->name;});if(it==rows.end()||!it->running)return false;row=*it;return true;}
 void Engine::report(const std::shared_ptr<Job>&j,Phase phase,const std::wstring&detail,DWORD game,unsigned long long base){
@@ -204,7 +202,7 @@ bool Engine::selectJobLocked(ULONGLONG now,ULONGLONG&due,std::shared_ptr<Job>&jo
         if(ready<=now&&(!best||ready<bestAt||(ready==bestAt&&kind<bestKind))){best=&r;bestAt=ready;bestKind=kind;}
     }
     if(!best)return false;selected=*best;job=std::make_shared<Job>();job->features=bestKind==1||(bestKind==2&&best->actionPending);job->recovery=!job->features&&bestKind==2&&best->phase==Phase::WaitingAdb;job->batch=bestKind==0&&best->playQueued;
-    job->index=selected.index;job->name=selected.name;job->generation=selected.generation;job->bootId=selected.bootId;job->useSu=selected.useSu;active_=job;
+    job->index=selected.index;job->name=selected.name;job->generation=selected.generation;job->bootId=selected.bootId;job->rootReady=selected.rootReady;active_=job;
     if(!job->features){nextConnect_=now+5000;best->playQueued=false;}return true;
 }
 void Engine::defer(const std::shared_ptr<Job>&j,Phase phase,const wchar_t*detail,ULONGLONG until){
@@ -245,7 +243,7 @@ void Engine::monitor(){
     std::vector<Row> rows;{std::lock_guard<std::mutex> lock(mutex_);for(const auto&r:state_.rows)if(r.wanted&&r.phase==Phase::Connected&&r.intent==Intent::Automatic)rows.push_back(r);}
     for(const auto&r:rows){
         if(!r.wanted||r.phase!=Phase::Connected||cancelled({}))continue;
-        auto j=std::make_shared<Job>();j->index=r.index;j->name=r.name;j->generation=r.generation;j->bootId=r.bootId;
+        auto j=std::make_shared<Job>();j->index=r.index;j->name=r.name;j->generation=r.generation;j->bootId=r.bootId;j->rootReady=r.rootReady;
         {std::lock_guard<std::mutex> lock(mutex_);auto row=std::find_if(state_.rows.begin(),state_.rows.end(),[&](auto&v){return v.index==r.index&&v.generation==r.generation&&v.wanted&&v.phase==Phase::Connected;});if(row==state_.rows.end())continue;active_=j;}
         std::string output;const auto health=command(true,L"-s emulator-"+std::to_wstring(5554+2*r.index)+L" shell "+quoteArg(healthScript(r.game)),output,j,HealthTimeoutMs)?parseHealth(output,r):Health::Unknown;
         bool lost=false,repair=false,valid=false;
@@ -266,11 +264,13 @@ void Engine::monitor(){
 }
 bool Engine::ensureAdb(const std::shared_ptr<Job>&j){
     if(!j->bootId.empty()){
-        std::string current;if(command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell cat /proc/sys/kernel/random/boot_id",current,j)&&trim(current)==j->bootId)return true;
+        std::string current;unsigned long long uid=0;
+        if(shell(j,L"id -u",current)&&number(trim(current),uid)){j->rootReady=(uid==0);return true;}
     }
     std::string text,listing;auto marker=[&]{
-        j->bootId.clear();j->useSu=false;if(!shell(j,L"cat /proc/sys/kernel/random/boot_id",text))return false;const auto boot=trim(text);if(!validBoot(boot))return false;
-        if(!command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell cat /proc/sys/kernel/random/boot_id",text,j)||trim(text)!=boot)return false;j->bootId=boot;return true;
+        j->bootId.clear();j->rootReady=false;if(!shell(j,L"cat /proc/sys/kernel/random/boot_id",text))return false;const auto boot=trim(text);if(!validBoot(boot))return false;
+        j->bootId=boot;unsigned long long uid=0;if(!shell(j,L"id -u",text)||!number(trim(text),uid)){j->bootId.clear();return false;}
+        j->rootReady=(uid==0);return true;
     };
     if(marker())return true;bool listed=command(true,L"devices",listing,j);Link link=classify(false,listed,listing,j->index);
     if(link==Link::Unknown){defer(j,Phase::WaitingAdb,L"Chờ ADB phản hồi; không reset khi chưa rõ lỗi");return false;}
@@ -298,9 +298,10 @@ void Engine::recoverAdb(const std::shared_ptr<Job>&j,const Row&r){
     defer(j,Phase::WaitingAdb,L"ADB đã phản hồi; chờ xác minh tiến trình game");
 }
 bool Engine::ensureRoot(const std::shared_ptr<Job>&j){
-    j->useSu=false;std::string text;
     if(j->bootId.empty())return false;
-    auto remember=[&]{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.bootId=j->bootId;r.useSu=false;}return true;};
+    auto remember=[&]{j->rootReady=true;std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.bootId=j->bootId;r.rootReady=true;}return true;};
+    if(j->rootReady)return remember();
+    std::string text;
     if(shell(j,L"id -u",text)&&trim(text)=="0")return remember();
     if(cancelled(j))return false;
     report(j,Phase::Checking,L"Nâng quyền ADB root");
@@ -313,25 +314,28 @@ bool Engine::ensureRoot(const std::shared_ptr<Job>&j){
     if(!cancelled(j))report(j,Phase::Failed,L"ADB chưa có quyền root; kiểm tra bật Root LDPlayer");
     return false;
 }
-bool Engine::context(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base){return inspectContext(j,pid,base)==ContextState::Verified;}
-ContextState Engine::inspectContext(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base){
+bool Engine::context(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base,std::string*mapsOut,std::string*ticksOut){return inspectContext(j,pid,base,mapsOut,ticksOut)==ContextState::Verified;}
+ContextState Engine::inspectContext(const std::shared_ptr<Job>&j,DWORD&pid,unsigned long long&base,std::string*mapsOut,std::string*ticksOut){
     std::string text;if(!shell(j,L"ps -A -o PID,PPID,NAME; result=$?; echo LDMENU_PS_$result",text))return ContextState::Unknown;
     text=trim(text);const std::string psEnd="LDMENU_PS_0";if(text.size()<psEnd.size()||text.compare(text.size()-psEnd.size(),psEnd.size(),psEnd))return ContextState::Unknown;text.resize(text.size()-psEnd.size());
     std::istringstream lines(text);std::string line;std::vector<DWORD> candidates;bool header=false;
     while(std::getline(lines,line)){std::istringstream row(line);std::string p,parent,name,extra;unsigned long long n=0;if(!(row>>p>>parent>>name))continue;if(p=="PID"&&parent=="PPID"&&name=="NAME"){header=true;continue;}if(name==Package){if(row>>extra||!number(p,n)||!n||n>MAXDWORD||candidates.size()>=4||std::find(candidates.begin(),candidates.end(),DWORD(n))!=candidates.end())return ContextState::Unknown;candidates.push_back(DWORD(n));}}
     if(!header)return ContextState::Unknown;if(candidates.empty())return ContextState::Absent;
-    auto maps=[&](DWORD p,unsigned long long&b){std::string out;if(!shell(j,L"cat /proc/"+std::to_wstring(p)+L"/maps && echo LDMENU_MAPS_OK",out))return ContextState::Unknown;out=trim(out);const std::string end="LDMENU_MAPS_OK";if(out.size()<end.size()||out.compare(out.size()-end.size(),end.size(),end))return ContextState::Unknown;out.resize(out.size()-end.size());return classifyMaps(out,b);};
-    unsigned matches=0;for(auto p:candidates){unsigned long long b=0;const auto state=maps(p,b);if(state==ContextState::Unknown)return state;if(state==ContextState::Verified){pid=p;base=b;matches++;}}
+    std::string verifiedMaps;
+    auto maps=[&](DWORD p,unsigned long long&b,std::string&raw){std::string out;if(!shell(j,L"cat /proc/"+std::to_wstring(p)+L"/maps && echo LDMENU_MAPS_OK",out))return ContextState::Unknown;out=trim(out);const std::string end="LDMENU_MAPS_OK";if(out.size()<end.size()||out.compare(out.size()-end.size(),end.size(),end))return ContextState::Unknown;out.resize(out.size()-end.size());raw=out;return classifyMaps(out,b);};
+    unsigned matches=0;for(auto p:candidates){unsigned long long b=0;std::string raw;const auto state=maps(p,b,raw);if(state==ContextState::Unknown)return state;if(state==ContextState::Verified){pid=p;base=b;verifiedMaps=std::move(raw);matches++;}}
     if(!matches)return ContextState::Absent;if(matches!=1)return ContextState::Unknown;
-    std::string first,ticks;char state=0;if(!shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",first)||!processStat(first,pid,ticks,state)||state=='Z'||state=='X'||state=='x')return ContextState::Unknown;
-    std::string note;if(!shell(j,L"dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x2d0)+L" count=36 2>/dev/null | xxd -p",text)||!bytes(text,note,36)||!knownNote(note))return ContextState::Unknown;
-    unsigned long long again=0;std::string after,afterTicks;char afterState=0;
-    if(maps(pid,again)!=ContextState::Verified||again!=base||!shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",after)||!processStat(after,pid,afterTicks,afterState)||ticks!=afterTicks||afterState=='Z'||afterState=='X'||afterState=='x')return ContextState::Unknown;
+    const auto verifyScript=L"st1=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; note=$(dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') || exit 1; st2=$(cat /proc/"+std::to_wstring(pid)+L"/stat 2>/dev/null) || exit 1; printf 'LDMENU_CTX_V1\\n%s\\n%s\\n%s\\nLDMENU_CTX_END\\n' \"$st1\" \"$note\" \"$st2\"";
+    if(!shell(j,verifyScript,text))return ContextState::Unknown;
+    std::istringstream vlines(text);std::vector<std::string> v;while(std::getline(vlines,line)){line=trim(line);if(!line.empty())v.push_back(line);if(v.size()>6)return ContextState::Unknown;}
+    std::string ticks,afterTicks,note;char state=0,afterState=0;
+    if(v.size()!=5||v[0]!="LDMENU_CTX_V1"||v[4]!="LDMENU_CTX_END"||!processStat(v[1],pid,ticks,state)||state=='Z'||state=='X'||state=='x'||!bytes(v[2],note,36)||!knownNote(note)||!processStat(v[3],pid,afterTicks,afterState)||ticks!=afterTicks||afterState=='Z'||afterState=='X'||afterState=='x')return ContextState::Unknown;
+    if(mapsOut)*mapsOut=std::move(verifiedMaps);if(ticksOut)*ticksOut=std::move(ticks);
     return ContextState::Verified;
 }
 bool Engine::openGame(const std::shared_ptr<Job>&j){
     Row before;if(!fresh(j,before))return false;std::string text;
-    if(!shell(j,L"id -u",text)||trim(text)!="0"){report(j,Phase::Failed,L"ADB chưa có quyền root");return false;}
+    if(!j->rootReady&&(!shell(j,L"id -u",text)||trim(text)!="0")){report(j,Phase::Failed,L"ADB chưa có quyền root");return false;}
     const auto loader=L"old=0; merged=0; p=/data/adb/modules/zygisk_il2cppdumper; if test -f $p/module.prop && test ! -e $p/disable && test ! -e $p/remove; then old=1; fi; p=/data/adb/modules/ldlogin; if test -f $p/ldmenu-loader.prop && test ! -e $p/disable && test ! -e $p/remove && grep -qx 'loader=ldnph-v1.2.0' $p/ldmenu-loader.prop && test $(sha256sum $p/zygisk/arm64-v8a.so | cut -d ' ' -f1) = a029b48dc4c354f8cf5a6fa2ab39c0db29f400305916ce5187bd8f061040554c && test $(sha256sum $p/zygisk/x86_64.so | cut -d ' ' -f1) = 3e348324a9eb26f0741fa57307c03aabd17f2021242456a43769c4763f50ed56; then merged=1; fi; if test $old = 1 && test $merged = 1; then echo LDNPH_DUPLICATE; elif test $old = 1 || test $merged = 1; then echo LDNPH_READY; fi";
     if(!shell(j,loader,text)||trim(text)!="LDNPH_READY"){report(j,Phase::Failed,trim(text)=="LDNPH_DUPLICATE"?L"Trùng loader; gỡ LDNPH cũ rồi restart LD":L"Thiếu loader LDLogin/LDNPH hoặc module đang tắt");return false;}
     std::wstring component;if(!shell(j,L"cmd package resolve-activity --brief com.vng.playtogether",text)||!launcher(text,component)){report(j,Phase::Failed,L"Chưa cài Play Together VNG");return false;}
@@ -357,16 +361,20 @@ bool Engine::restart(const std::shared_ptr<Job>&j,const Row&old){
     std::wstring cmd=L"\""+std::wstring(Console)+L"\" launch --index "+std::to_wstring(j->index);STARTUPINFOW si{};si.cb=sizeof(si);PROCESS_INFORMATION pi{};if(!CreateProcessW(Console,cmd.data(),nullptr,nullptr,FALSE,flags,nullptr,nullptr,&si,&pi))return false;CloseHandle(pi.hThread);CloseHandle(pi.hProcess);
     end=GetTickCount64()+120000;while(GetTickCount64()<end){if(!wait(1500,j))return false;if(fresh(j,now)&&now.vm!=old.vm){{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.vm=now.vm;r.ui=now.ui;}}report(j,Phase::Repairing,L"LD đã mở lại; chờ 30 giây");return wait(30000,j);}}return false;
 }
-void Engine::connected(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long base){
+void Engine::connected(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long base,const std::string&verifiedTicks){
+    std::string ticks=verifiedTicks;
+    if(ticks.empty()){std::string stat;char processState=0;if(!shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",stat,HealthTimeoutMs)||!processStat(stat,pid,ticks,processState)||processState=='Z'||processState=='X'||processState=='x'){report(j,Phase::Failed,L"Chưa xác minh được danh tính tiến trình game");return;}}
+    j->startTicks=ticks;
     Config config;Intent intent=Intent::Automatic;unsigned long long revision=0;{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){config=r.config;intent=r.intent;revision=r.revision;}}
     bool known=false,matched=intent==Intent::Automatic&&controlMatches(j,pid,base,config,known),automate=false;unsigned seconds=60;
-    std::string stat,ticks;char processState=0;if(!shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",stat,HealthTimeoutMs,false)||!processStat(stat,pid,ticks,processState)||processState=='Z'||processState=='X'||processState=='x'){report(j,Phase::Failed,L"Chưa xác minh được danh tính tiến trình game");return;}
-    {std::lock_guard<std::mutex> lock(mutex_);seconds=state_.global.settleSeconds;for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){if(r.revision!=revision){matched=false;known=false;}automate=r.intent==Intent::Automatic?(known?!matched:bool(r.config.function||r.config.filter||r.config.sell)):r.actionPending;r.applyAt=automate?GetTickCount64()+((r.intent==Intent::Automatic||j->loaded)?seconds*1000ULL:0):0;r.misses=0;r.probeErrors=0;r.bootId=j->bootId;r.useSu=j->useSu;r.startTicks=ticks;}}
+    {std::lock_guard<std::mutex> lock(mutex_);seconds=state_.global.settleSeconds;for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){if(r.revision!=revision){matched=false;known=false;}automate=r.intent==Intent::Automatic?(known?!matched:bool(r.config.function||r.config.filter||r.config.sell)):r.actionPending;r.applyAt=automate?GetTickCount64()+((r.intent==Intent::Automatic||j->loaded)?seconds*1000ULL:0):0;r.misses=0;r.probeErrors=0;r.bootId=j->bootId;r.rootReady=j->rootReady;r.startTicks=ticks;}}
     report(j,Phase::Connected,matched?L"Đã nhận lại cấu hình đang chạy":automate?L"Đã kết nối; chờ "+std::to_wstring(seconds)+L" giây để áp dụng cấu hình":L"Đã kết nối",pid,base);
 }
 bool Engine::controlMatches(const std::shared_ptr<Job>&j,DWORD pid,unsigned long long base,const Config&config,bool&known){
-    known=false;std::string output,values;DWORD currentPid=0;unsigned long long currentBase=0;
-    if(!shell(j,L"dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x117044)+L" count=48 2>/dev/null | xxd -p",output)||!bytes(output,values,48)||!context(j,currentPid,currentBase)||currentPid!=pid||currentBase!=base)return false;
+    known=false;if(j->startTicks.empty())return false;
+    const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(pid)+L"/stat | cut -d ' ' -f20) = "+ticks;
+    std::string output,values;
+    if(!shell(j,start+L" && dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x117044)+L" count=48 2>/dev/null | xxd -p && "+start,output)||!bytes(output,values,48))return false;
     known=true;return sameControl(values,config);
 }
 static bool validWord(unsigned relative,unsigned value){return relative==0?(value==0||value==1||value==4||value==11):relative==8?value<=2:relative==12||relative==4||relative==24||relative==36?value<=1:relative==32?value<=6:relative==20?(value==0||value==11):relative==28?value<=2147483647u:relative==48?value==0:false;}
@@ -385,9 +393,9 @@ static bool writableControl(const std::string&maps,unsigned long long base,unsig
         if(writable&&(file||bss)&&address>=lo&&address+4<=hi)return true;fileEnd=file&&writable?hi:0;
     }return false;
 }
-bool Engine::word(const std::shared_ptr<Job>&j,const Row&row,unsigned relative,unsigned value){
-    if(!validWord(relative,value)||cancelled(j)||j->startTicks.empty())return false;Row now;std::string output;
-    if(!fresh(j,now)||now.vm!=row.vm)return false;
+bool Engine::word(const std::shared_ptr<Job>&j,const Row&row,unsigned relative,unsigned value,bool checkVm){
+    if(!validWord(relative,value)||cancelled(j)||j->startTicks.empty())return false;std::string output;
+    if(checkVm){Row now;if(!fresh(j,now)||now.vm!=row.vm)return false;}
     const auto encoded=littleHex(value);const std::wstring data(encoded.begin(),encoded.end()),ticks(j->startTicks.begin(),j->startTicks.end());const auto memory=L"/proc/"+std::to_wstring(row.game)+L"/mem";const auto address=std::to_wstring(row.base+0x117044+relative);
     std::string noteHex="040000001400000003000000474e5500";char byte[3];for(auto v:BuildId){std::snprintf(byte,3,"%02x",v);noteHex+=byte;}const std::wstring expected(noteHex.begin(),noteHex.end());
     const auto start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(row.game)+L"/stat | cut -d ' ' -f20) = "+ticks;
@@ -402,9 +410,20 @@ bool Engine::readMemory(const std::shared_ptr<Job>&j,const Row&r,unsigned offset
     return shell(j,L"test $(sed 's/.*) //' /proc/"+std::to_wstring(r.game)+L"/stat | cut -d ' ' -f20) = "+ticks+L" && dd if=/proc/"+std::to_wstring(r.game)+L"/mem bs=1 skip="+std::to_wstring(r.base+offset)+L" count="+std::to_wstring(count)+L" 2>/dev/null | xxd -p",output)&&bytes(output,data,count);
 }
 bool Engine::resetAll(const std::shared_ptr<Job>&j,const Row&r){
-    for(auto offset:resetOffsets())if(!word(j,r,offset,0)||!wait(100,j))return false;
-    std::string data;if(!readMemory(j,r,0x117044,52,data))return false;
-    for(auto offset:resetOffsets())if(u32(data,offset)!=0)return false;return true;
+    if(cancelled(j)||j->startTicks.empty()||!r.game)return false;
+    const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),memory=L"/proc/"+std::to_wstring(r.game)+L"/mem";
+    std::string noteHex="040000001400000003000000474e5500";char byte[3];for(auto v:BuildId){std::snprintf(byte,3,"%02x",v);noteHex+=byte;}const std::wstring expected(noteHex.begin(),noteHex.end());
+    const auto start=L"test $(sed 's/.*) //' /proc/"+std::to_wstring(r.game)+L"/stat | cut -d ' ' -f20) = "+ticks;
+    const auto note=L"test $(dd if="+memory+L" bs=1 skip="+std::to_wstring(r.base+0x2d0)+L" count=36 2>/dev/null | xxd -p | tr -d '[:space:]') = "+expected;
+    std::wstring writes;
+    for(auto offset:resetOffsets()){
+        if(!validWord(offset,0))return false;
+        writes+=L"printf 00000000 | xxd -r -p | dd of="+memory+L" seek="+std::to_wstring(r.base+0x117044+offset)+L" bs=1 count=4 2>/dev/null && (usleep 100000 2>/dev/null || sleep 0.1) && ";
+    }
+    const auto script=start+L" && "+note+L" && "+writes+start+L" && "+note+L" && dd if="+memory+L" bs=1 skip="+std::to_wstring(r.base+0x117044)+L" count=52 2>/dev/null | xxd -p";
+    std::string output,data;if(!shell(j,script,output)||!bytes(output,data,52))return false;
+    for(auto offset:resetOffsets())if(u32(data,offset)!=0)return false;
+    return true;
 }
 static bool vectorBounds(const std::string&data,unsigned long long&begin,size_t&count){
     if(data.size()!=24)return false;begin=u64(data,0);const auto end=u64(data,8),capacity=u64(data,16);
@@ -416,17 +435,23 @@ static bool readableRange(const std::string&maps,unsigned long long address,size
     while(std::getline(lines,line)){std::istringstream fields(line);std::string range,perms;fields>>range>>perms;const auto dash=range.find('-');unsigned long long begin=0,end=0;if(dash!=std::string::npos&&perms.size()==4&&perms[0]=='r'&&number(range.substr(0,dash),begin,16)&&number(range.substr(dash+1),end,16)&&address>=begin&&address+size<=end)return true;}return false;
 }
 bool Engine::waitFilter(const std::shared_ptr<Job>&j,const Row&r,const std::vector<unsigned>&ids,bool zeroMailbox){
-    const auto end=GetTickCount64()+6000;
+    if(cancelled(j)||j->startTicks.empty()||!r.game)return false;
+    const std::wstring ticks(j->startTicks.begin(),j->startTicks.end()),pid=std::to_wstring(r.game),mem=L"/proc/"+pid+L"/mem";
+    const auto start=L"test $(sed 's/.*) //' /proc/"+pid+L"/stat | cut -d ' ' -f20) = "+ticks;
+    std::string maps;const auto end=GetTickCount64()+6000;
     do{
-        std::string meta,data,latch;unsigned long long begin=0;size_t count=0;
-        if(!readMemory(j,r,0x118798,24,meta)||!vectorBounds(meta,begin,count))return false;
-        bool matches=count==ids.size();
-        if(matches&&count){std::string maps,output,after;const std::wstring ticks(j->startTicks.begin(),j->startTicks.end());
-            if(!shell(j,L"cat /proc/"+std::to_wstring(r.game)+L"/maps",maps)||!readableRange(maps,begin,count*4))return false;
-            if(!shell(j,L"test $(sed 's/.*) //' /proc/"+std::to_wstring(r.game)+L"/stat | cut -d ' ' -f20) = "+ticks+L" && dd if=/proc/"+std::to_wstring(r.game)+L"/mem bs=1 skip="+std::to_wstring(begin)+L" count="+std::to_wstring(count*4)+L" 2>/dev/null | xxd -p",output)||!bytes(output,data,count*4)||!readMemory(j,r,0x118798,24,after)||after!=meta)return false;
-            for(size_t i=0;i<count;i++)if(u32(data,i*4)!=ids[i])matches=false;
+        std::string out,metaLatch;unsigned long long begin=0;size_t count=0;
+        if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x1187f8)+L" count=1 2>/dev/null; } | xxd -p",out)||!bytes(out,metaLatch,25))return false;
+        const auto meta=metaLatch.substr(0,24);const char latch=metaLatch[24];
+        if(!vectorBounds(meta,begin,count))return false;
+        bool matches=count==ids.size()&&(!zeroMailbox||latch==0);
+        if(matches&&count){
+            if((maps.empty()||!readableRange(maps,begin,count*4))&&(!shell(j,L"cat /proc/"+pid+L"/maps",maps)||!readableRange(maps,begin,count*4)))return false;
+            std::string bodyAfter;
+            if(!shell(j,start+L" && { dd if="+mem+L" bs=1 skip="+std::to_wstring(begin)+L" count="+std::to_wstring(count*4)+L" 2>/dev/null; dd if="+mem+L" bs=1 skip="+std::to_wstring(r.base+0x118798)+L" count=24 2>/dev/null; } | xxd -p",out)||!bytes(out,bodyAfter,count*4+24)||bodyAfter.substr(count*4)!=meta)return false;
+            for(size_t i=0;i<count;i++)if(u32(bodyAfter,i*4)!=ids[i])matches=false;
         }
-        if(matches){if(!zeroMailbox)return true;if(!readMemory(j,r,0x1187f8,1,latch))return false;if(latch[0]==0)return true;}
+        if(matches)return true;
         if(!wait(250,j))return false;
     }while(GetTickCount64()<end&&!cancelled(j));return false;
 }
@@ -435,17 +460,17 @@ bool Engine::applyIds(const std::shared_ptr<Job>&j,const Row&r,const std::vector
     // consumes its nonzero pulse once; returning to zero releases that latch.
     // Clear the previous vector by its existing reset flag, never by writing
     // vector pointers or heap data from the host.
-    if(!word(j,r,28,0)||!word(j,r,4,0)||!wait(250,j)||!waitFilter(j,r,{}))return false;
-    if(!word(j,r,24,1)||!word(j,r,4,1)||!wait(250,j)||!waitFilter(j,r,{},true))return false;
+    if(!word(j,r,28,0,false)||!word(j,r,4,0,false)||!wait(250,j)||!waitFilter(j,r,{}))return false;
+    if(!word(j,r,24,1,false)||!word(j,r,4,1,false)||!wait(250,j)||!waitFilter(j,r,{},true))return false;
     if(r.quick.function==1){bool cleared=false;const auto end=GetTickCount64()+6000;do{std::string flag;if(!readMemory(j,r,0x1187b4,1,flag))return false;if(flag[0]==0){cleared=true;break;}if(!wait(250,j))return false;}while(GetTickCount64()<end);if(!cleared)return false;}
-    if(!word(j,r,24,0))return false;
-    if(ids.empty())return word(j,r,4,0);
+    if(!word(j,r,24,0,false))return false;
+    if(ids.empty())return word(j,r,4,0,false);
     std::vector<unsigned> accepted;
     for(auto id:ids){
         const bool special=r.quick.function==1&&id==5555;if(!special)accepted.push_back(id);
-        if(!word(j,r,28,id)||!wait(100,j)||!waitFilter(j,r,accepted))return false;
+        if(!word(j,r,28,id,false)||!wait(100,j)||!waitFilter(j,r,accepted))return false;
         if(special){bool received=false;const auto end=GetTickCount64()+6000;do{std::string flag;if(!readMemory(j,r,0x1187b4,1,flag))return false;if(flag[0]==1){received=true;break;}if(!wait(250,j))return false;}while(GetTickCount64()<end);if(!received)return false;}
-        if(!word(j,r,28,0)||!wait(200,j)||!waitFilter(j,r,accepted,true))return false;
+        if(!word(j,r,28,0,false)||!wait(200,j)||!waitFilter(j,r,accepted,true))return false;
     }
     return true;
 }
@@ -455,16 +480,16 @@ void Engine::runtimeAction(const std::shared_ptr<Job>&j,Row row){
         report(j,ok?Phase::Connected:Phase::Failed,detail,row.game,row.base);
     };
     if(!ensureAdb(j)||!ensureRoot(j))return;
-    DWORD pid=0;unsigned long long base=0;auto state=inspectContext(j,pid,base);
+    DWORD pid=0;unsigned long long base=0;std::string maps,ticks;auto state=inspectContext(j,pid,base,&maps,&ticks);
     if(row.intent==Intent::Reset&&state==ContextState::Absent){
         {std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.actionPending=false;r.quickActive=0;r.applyAt=0;r.wanted=false;}}
         report(j,Phase::Idle,L"Đã lưu mặc định; không có chức năng đang chạy");return;
     }
     if(state!=ContextState::Verified||(row.game&&row.game!=pid)||(row.base&&row.base!=base)){finish(false,L"Phiên game đã đổi; chưa reset hoặc chạy chức năng");return;}
-    row.game=pid;row.base=base;Row now;std::string elf,header,maps,stat;char ps=0;
-    bool ok=fresh(j,now)&&now.vm==row.vm&&shell(j,L"dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base)+L" count=4096 2>/dev/null | xxd -p",elf)&&bytes(elf,header,4096)&&controlSegment(header)&&shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/maps",maps);
+    row.game=pid;row.base=base;j->startTicks=ticks;Row now;std::string elf,header;
+    bool ok=(row.startTicks.empty()||row.startTicks==j->startTicks)&&fresh(j,now)&&now.vm==row.vm&&shell(j,L"dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base)+L" count=4096 2>/dev/null | xxd -p",elf)&&bytes(elf,header,4096)&&controlSegment(header);
     if(ok)for(auto off:resetOffsets())if(!writableControl(maps,base,off))ok=false;
-    if(ok)ok=writableControl(maps,base,28)&&shell(j,L"cat /proc/"+std::to_wstring(pid)+L"/stat",stat)&&processStat(stat,pid,j->startTicks,ps)&&ps!='Z'&&ps!='X'&&ps!='x'&&(row.startTicks.empty()||row.startTicks==j->startTicks);
+    if(ok)ok=writableControl(maps,base,28);
     if(!ok){finish(false,L"Chưa xác minh được vùng điều khiển; dừng lệnh");return;}
     report(j,Phase::Applying,row.intent==Intent::Reset?L"Reset All":L"Áp dụng chức năng rời",pid,base);
     std::string before;if(!readMemory(j,row,0x117044,52,before)){finish(false,L"Không đọc được trạng thái chức năng");return;}
@@ -473,8 +498,8 @@ void Engine::runtimeAction(const std::shared_ptr<Job>&j,Row row){
     if(reset)ok=resetAll(j,row);
     if(ok&&row.intent==Intent::Quick){
         if(!validQuick(row.quick))ok=false;
-        if(ok&&reset)for(const auto&s:quickStart(row.quick.function))if(!word(j,row,s.offset,s.value)||!wait(s.delay,j)){ok=false;break;}
-        if(ok)ok=applyIds(j,row,row.quick.ids)&&word(j,row,12,row.quick.function==1&&row.quick.sell?1:0);
+        if(ok&&reset)for(const auto&s:quickStart(row.quick.function))if(!word(j,row,s.offset,s.value,false)||!wait(s.delay,j)){ok=false;break;}
+        if(ok)ok=applyIds(j,row,row.quick.ids)&&word(j,row,12,row.quick.function==1&&row.quick.sell?1:0,false);
     }
     std::string after;DWORD afterPid=0;unsigned long long afterBase=0;
     if(ok)ok=readMemory(j,row,0x117044,52,after)&&context(j,afterPid,afterBase)&&afterPid==pid&&afterBase==base;
@@ -485,16 +510,16 @@ void Engine::apply(const std::shared_ptr<Job>&j,const Row&row){
     if(row.actionPending){runtimeAction(j,row);return;}
     if(!validConfig(row.config)||cancelled(j))return;if(!ensureAdb(j)||!ensureRoot(j))return;
     report(j,Phase::Applying,L"Áp dụng Bọ / Lọc / Bán",row.game,row.base);
-    std::string elf,header,stat,maps;DWORD verifiedPid=0;unsigned long long verifiedBase=0;
-    bool ok=context(j,verifiedPid,verifiedBase)&&verifiedPid==row.game&&verifiedBase==row.base&&shell(j,L"dd if=/proc/"+std::to_wstring(row.game)+L"/mem bs=1 skip="+std::to_wstring(row.base)+L" count=4096 2>/dev/null | xxd -p",elf)&&bytes(elf,header,4096)&&controlSegment(header)&&shell(j,L"cat /proc/"+std::to_wstring(row.game)+L"/maps",maps)&&writableControl(maps,row.base,0)&&writableControl(maps,row.base,36)&&shell(j,L"cat /proc/"+std::to_wstring(row.game)+L"/stat",stat);
+    Row now;std::string elf,header,maps,ticks;DWORD verifiedPid=0;unsigned long long verifiedBase=0;
+    bool ok=fresh(j,now)&&now.vm==row.vm&&context(j,verifiedPid,verifiedBase,&maps,&ticks)&&verifiedPid==row.game&&verifiedBase==row.base&&ticks==row.startTicks&&shell(j,L"dd if=/proc/"+std::to_wstring(row.game)+L"/mem bs=1 skip="+std::to_wstring(row.base)+L" count=4096 2>/dev/null | xxd -p",elf)&&bytes(elf,header,4096)&&controlSegment(header)&&writableControl(maps,row.base,0)&&writableControl(maps,row.base,36);
     if(ok)for(auto off:resetOffsets())if(!writableControl(maps,row.base,off))ok=false;
-    if(ok){std::string ticks;char state=0;ok=processStat(stat,row.game,ticks,state)&&ticks==row.startTicks&&state!='Z'&&state!='X'&&state!='x';if(ok)j->startTicks=ticks;}
+    if(ok)j->startTicks=ticks;
     if(ok){std::string data,existing;ok=shell(j,L"dd if=/proc/"+std::to_wstring(row.game)+L"/mem bs=1 skip="+std::to_wstring(row.base+0x117044)+L" count=48 2>/dev/null | xxd -p",data)&&bytes(data,existing,48);if(ok&&sameControl(existing,row.config)){{std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation&&r.revision==row.revision)r.applyAt=0;}report(j,Phase::Connected,L"Đã nhận lại cấu hình đang chạy",row.game,row.base);return;}}
     if(ok)ok=resetAll(j,row)&&wait(500,j);
-    if(ok&&row.config.function)ok=word(j,row,36,1)&&wait(100,j)&&word(j,row,8,row.config.function==2?1:2)&&wait(1000,j)&&word(j,row,0,4)&&wait(500,j);
-    if(ok)ok=word(j,row,32,0)&&wait(500,j);
-    if(ok&&row.config.filter)ok=word(j,row,32,unsigned(row.config.filter))&&wait(500,j);
-    if(ok)ok=word(j,row,12,row.config.sell?1:0);
+    if(ok&&row.config.function)ok=word(j,row,36,1,false)&&wait(100,j)&&word(j,row,8,row.config.function==2?1:2,false)&&wait(1000,j)&&word(j,row,0,4,false)&&wait(500,j);
+    if(ok)ok=word(j,row,32,0,false)&&wait(500,j);
+    if(ok&&row.config.filter)ok=word(j,row,32,unsigned(row.config.filter),false)&&wait(500,j);
+    if(ok)ok=word(j,row,12,row.config.sell?1:0,false);
     if(cancelled(j))return;
     std::string output,values;DWORD pid=0;unsigned long long base=0;
     if(ok)ok=context(j,pid,base)&&pid==row.game&&base==row.base&&shell(j,L"dd if=/proc/"+std::to_wstring(pid)+L"/mem bs=1 skip="+std::to_wstring(base+0x117044)+L" count=48 2>/dev/null | xxd -p",output)&&bytes(output,values,48)&&u32(values,0)==(row.config.function?4u:0u)&&(!row.config.function||(u32(values,8)==(row.config.function==2?1u:2u)&&u32(values,36)==1))&&u32(values,32)==unsigned(row.config.filter)&&u32(values,12)==unsigned(row.config.sell);
@@ -508,8 +533,8 @@ void Engine::connect(const std::shared_ptr<Job>&j){
         {std::lock_guard<std::mutex> lock(mutex_);for(auto&r:state_.rows)if(r.index==j->index&&r.generation==j->generation){r.vm=before.vm;r.ui=before.ui;}}
         if(!ensureAdb(j))return;
         if(!ensureRoot(j))return;
-        DWORD pid=0;unsigned long long base=0;
-        const auto initial=inspectContext(j,pid,base);if(initial==ContextState::Verified){connected(j,pid,base);return;}
+        DWORD pid=0;unsigned long long base=0;std::string ticks;
+        const auto initial=inspectContext(j,pid,base,nullptr,&ticks);if(initial==ContextState::Verified){connected(j,pid,base,ticks);return;}
         if(initial==ContextState::Unknown){defer(j,Phase::WaitingContext,L"Chờ xác minh thư viện; chưa mở lại game");return;}
         if(!commitReady()){report(j,Phase::Failed,L"Commit trống dưới 2 GB; dừng kết nối");return;}
         if(!openGame(j)){
@@ -520,12 +545,12 @@ void Engine::connect(const std::shared_ptr<Job>&j){
         }
         j->loaded=true;
         report(j,Phase::Loading,L"Đang chờ game nạp thư viện");auto end=GetTickCount64()+ModuleLoadTimeoutMs;
-        while(GetTickCount64()<end&&!cancelled(j)){if(!wait(2000,j))return;Row current;if(!fresh(j,current)||current.vm!=before.vm){report(j,Phase::Failed,L"LD đã đóng hoặc thay backend");return;}if(context(j,pid,base)){
+        while(GetTickCount64()<end&&!cancelled(j)){if(!wait(2000,j))return;Row current;if(!fresh(j,current)||current.vm!=before.vm){report(j,Phase::Failed,L"LD đã đóng hoặc thay backend");return;}if(context(j,pid,base,nullptr,&ticks)){
                 std::string text;if(shell(j,L"sha256sum /data/local/tmp/libmod.so",text)&&text.compare(0,64,Digest)==0)shell(j,L"rm -f /data/local/tmp/libmod.so",text);
-                connected(j,pid,base);return;}}
+                connected(j,pid,base,ticks);return;}}
         if(cancelled(j))return;
         // Only a fresh, complete absence proof can authorize a VM restart.
-        const auto final=inspectContext(j,pid,base);if(final==ContextState::Verified){connected(j,pid,base);return;}
+        const auto final=inspectContext(j,pid,base,nullptr,&ticks);if(final==ContextState::Verified){connected(j,pid,base,ticks);return;}
         if(final==ContextState::Unknown){defer(j,Phase::WaitingContext,L"Chưa xác minh được thư viện; không restart LD");return;}
         ULONGLONG retryAt=0;if(!reserveRestart(j,retryAt)){if(retryAt)defer(j,Phase::Cooldown,L"Đã đủ 5 lượt restart trong 30 phút; chờ giới hạn",retryAt);return;}
         restarts++;report(j,Phase::Repairing,L"Nạp thư viện thất bại; restart LD "+std::to_wstring(restarts)+L"/5");

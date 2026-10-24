@@ -18,12 +18,19 @@ Bản snapshot này ghi lại trạng thái hoạt động đầy đủ tính n�
   - Xác minh tiến trình `com.vng.playtogether`, kiểm tra loader Zygisk (`LDLogin 1.30` tích hợp hoặc `zygisk_il2cppdumper`), kiểm tra SHA256 và GNU Build ID của `libmod-arm64.so`, tự nạp lại thư viện khi cần và giới hạn tối đa 5 lần restart máy ảo trong 30 phút.
   - Health monitor chạy định kỳ mỗi 30 giây bằng shell thường (`LDMENU_HEALTH_V1`), tự động Reconnect sau 2 lần xác nhận mất tiến trình liên tiếp và tự phục hồi khi ADB ngắt kết nối tạm thời (`WaitingAdb`).
   - Vượt qua 164/164 bài kiểm tra nội bộ (`--self-test`).
-- **Các hạng mục chuẩn bị tối ưu ở bước tiếp theo:**
-  1. Giảm số lần gọi lặp `ldconsole.exe list2` (`fresh()`) và gộp chuỗi ghi 4-byte (`resetAll`, `applyIds`, `waitFilter`) để giảm số tiến trình `adb.exe` phải khởi tạo.
-  2. Gộp các bước đọc `/proc/<pid>/maps`, `/proc/<pid>/stat` và Build ID trong `inspectContext` / `apply` / `runtimeAction`.
-  3. Nhớ trạng thái `rootReady` theo `bootId` và dọn bỏ trường `useSu` không còn dùng.
-  4. Xử lý triệt để việc đọc nốt dữ liệu còn sót trong pipe sau khi tiến trình con kết thúc trong `Engine::command`.
-  5. Tách mã hit-test của vùng nền tối bên ngoài popup khỏi nút đóng (`X`) trong `main.cpp`.
+- **Các hạng mục đã tối ưu hóa (Post-optimization — `v1.1-optimized`):**
+  1. **Gộp lệnh ADB & bỏ gọi lặp `ldconsole.exe list2` (`fresh()`):**
+     - `Engine::resetAll`: Gộp 9 lần ghi 4-byte + delay 100ms + đọc lại 52 byte kiểm chứng vào **1 lệnh `adb shell` duy nhất** (giảm từ 19 tiến trình con xuống còn 1 lệnh `adb.exe`).
+     - `Engine::word(..., checkVm)`: Bỏ gọi lặp `ldconsole list2` trước mỗi từ 4-byte trong `apply`, `runtimeAction` và `applyIds` sau khi đã xác minh `fresh` ở đầu thao tác.
+     - `Engine::waitFilter`: Gộp đọc metadata vector (`0x118798`, 24 byte) + latch (`0x1187f8`, 1 byte) trong 1 lệnh `adb shell`, cache `/proc/<pid>/maps` và gộp đọc mảng phần tử heap + metadata đối chiếu sau cùng vào 1 lệnh `adb shell`.
+  2. **Tối ưu `inspectContext`, `connected` & `controlMatches`:**
+     - Gộp bước kiểm tra `stat` trước + đọc 36-byte GNU Build ID (`base+0x2d0`) + `stat` sau vào 1 lệnh `adb shell`, đồng thời trả luôn `maps` và `startTicks` đã xác minh cho `connected`, `runtimeAction`, `apply` để không phải gọi lại `cat /proc/<pid>/maps` và `cat /proc/<pid>/stat`.
+  3. **Nhớ trạng thái `rootReady` theo `bootId` & dọn mã `useSu`:**
+     - Kiểm tra đồng thời `boot_id` và `id -u` ngay trong `Engine::ensureAdb`, giúp `Engine::ensureRoot` trả về ngay lập tức (0 lệnh `adb.exe` phát sinh thêm) khi `adbd` đã ở quyền `UID 0`.
+  4. **Đọc vét pipe trong `Engine::command`:**
+     - Kiểm tra trạng thái thoát tiến trình trước khi `PeekNamedPipe` để đảm bảo không bỏ sót dữ liệu stdout cuối cùng của các lệnh ngắn.
+  5. **Sửa UX hover nền tối Popup (`main.cpp`):**
+     - Tách mã hit-test vùng nền tối bên ngoài popup thành `-19` (vẫn đóng popup khi click nhưng không làm sáng nhầm nút `X` `-6` khi rê chuột ngoài bảng).
 
 ## Quick actions and Reset All (2026-10-24)
 
