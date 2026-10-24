@@ -23,7 +23,7 @@ const unsigned Delays[]={0,30,60,90,120,180,300};
 }
 class Application {
     HWND window_=nullptr;ldcontrol::Engine engine_;ldcontrol::Snapshot state_;
-    ID2D1Factory*factory_=nullptr;IDWriteFactory*writeFactory_=nullptr;ID2D1HwndRenderTarget*target_=nullptr;ID2D1SolidColorBrush*brush_=nullptr;ID2D1PathGeometry*playShape_=nullptr,*refreshShape_=nullptr;ID2D1StrokeStyle*roundStroke_=nullptr;
+    ID2D1Factory*factory_=nullptr;IDWriteFactory*writeFactory_=nullptr;ID2D1HwndRenderTarget*target_=nullptr;ID2D1SolidColorBrush*brush_=nullptr;ID2D1PathGeometry*playShape_=nullptr,*refreshShape_=nullptr,*refreshTips_=nullptr;ID2D1StrokeStyle*roundStroke_=nullptr;
     IDWriteTextFormat*font_=nullptr,*small_=nullptr,*bold_=nullptr,*icon_=nullptr,*caption_=nullptr;
     float dpi_=96,width_=800,height_=450,rowScroll_=0;int hover_=-99,focus_=-1;bool tracking_=false;
     int settingsIndex_=-1,dropdown_=0,dropSelection_=0;std::wstring settingsName_,settingsError_;ldcontrol::Config draft_;
@@ -50,8 +50,8 @@ class Application {
     void text(const std::wstring&s,float x,float y,float w,float h,unsigned c,IDWriteTextFormat*f=nullptr,DWRITE_TEXT_ALIGNMENT align=DWRITE_TEXT_ALIGNMENT_LEADING){f=f?f:font_;f->SetTextAlignment(align);color(c);target_->DrawTextW(s.c_str(),UINT32(s.size()),f,D2D1::RectF(x,y,x+w,y+h),brush_,D2D1_DRAW_TEXT_OPTIONS_CLIP);}
     void glyph(const wchar_t*s,float x,float y,float w,float h,unsigned c,bool caption=false){text(s,x,y,w,h,c,caption?caption_:icon_,DWRITE_TEXT_ALIGNMENT_CENTER);}
     void iconButton(int id,const wchar_t*s,float x,float y,float size=30){if(hover_==id)fill(x,y,x+size,y+size,UI::Hover,5);glyph(s,x,y,size,size,UI::Accent);}
-    void refreshIcon(int id,float x,float y,unsigned c=UI::Accent,unsigned hoverBg=UI::Hover){if(hover_==id)fill(x,y,x+30,y+30,hoverBg,5);if(!refreshShape_)return;D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Translation(x,y));color(c);target_->DrawGeometry(refreshShape_,brush_,1.85f,roundStroke_);target_->SetTransform(original);}
-    void drawPlayShape(float x,float y,unsigned c,float scale=.82f){if(!playShape_)return;D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,scale,D2D1::Point2F(15,15))*D2D1::Matrix3x2F::Translation(x,y));color(c);target_->FillGeometry(playShape_,brush_);target_->SetTransform(original);}
+    void refreshIcon(int id,float x,float y,unsigned c=UI::Accent,unsigned hoverBg=UI::Hover){if(hover_==id)fill(x,y,x+30,y+30,hoverBg,5);if(!refreshShape_||!refreshTips_)return;D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Translation(x,y));color(c);target_->DrawGeometry(refreshShape_,brush_,1.8f,roundStroke_);target_->FillGeometry(refreshTips_,brush_);target_->DrawGeometry(refreshTips_,brush_,1.1f,roundStroke_);target_->SetTransform(original);}
+    void drawPlayShape(float x,float y,unsigned c,float scale=.78f){if(!playShape_)return;D2D1_MATRIX_3X2_F original;target_->GetTransform(&original);target_->SetTransform(D2D1::Matrix3x2F::Scale(scale,scale,D2D1::Point2F(15,15))*D2D1::Matrix3x2F::Translation(x,y));color(c);target_->FillGeometry(playShape_,brush_);target_->SetTransform(original);}
     void playButton(float x,float y){const bool running=state_.playRunning&&!state_.playStopping;if(hover_==-16)fill(x,y,x+30,y+30,UI::Hover,5);if(running){fill(x+9.8f,y+8.2f,x+13.2f,y+21.8f,UI::Accent,1.7f);fill(x+16.8f,y+8.2f,x+20.2f,y+21.8f,UI::Accent,1.7f);}else drawPlayShape(x,y,UI::Accent);}
     void toggleDraw(float x,float y,bool on){fill(x,y,x+36,y+18,on?UI::Accent:0x303030,9);color(UI::Text);target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x+(on?27:9),y+9),6,6),brush_);}
     float listBottom()const{return std::max(Top+RowHeight,height_-12-(state_.error.empty()?0:26));}
@@ -216,7 +216,7 @@ class Application {
         case WM_DESTROY:PostQuitMessage(0);return 0;
     }return DefWindowProcW(window_,m,p,l);}
 public:
-    ~Application(){engine_.stop();discard();release(roundStroke_);release(refreshShape_);release(playShape_);if(editFont_)DeleteObject(editFont_);release(caption_);release(icon_);release(bold_);release(small_);release(font_);release(writeFactory_);release(factory_);}
+    ~Application(){engine_.stop();discard();release(roundStroke_);release(refreshTips_);release(refreshShape_);release(playShape_);if(editFont_)DeleteObject(editFont_);release(caption_);release(icon_);release(bold_);release(small_);release(font_);release(writeFactory_);release(factory_);}
     bool initialize(HINSTANCE instance){
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&factory_))||FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(&writeFactory_))))return false;
         auto font=[&](float size,DWRITE_FONT_WEIGHT weight,IDWriteTextFormat**out,const wchar_t*name=L"Segoe UI"){auto hr=writeFactory_->CreateTextFormat(name,nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size,L"vi-VN",out);if(SUCCEEDED(hr)){(*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);(*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);}return SUCCEEDED(hr);};
@@ -224,23 +224,32 @@ public:
         const auto strokeProps=D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_LINE_JOIN_ROUND,2.f);
         if(FAILED(factory_->CreateStrokeStyle(strokeProps,nullptr,0,&roundStroke_)))return false;
         if(FAILED(factory_->CreatePathGeometry(&playShape_)))return false;ID2D1GeometrySink*sink=nullptr;if(FAILED(playShape_->Open(&sink)))return false;
-        sink->BeginFigure(D2D1::Point2F(9.5f,8.9f),D2D1_FIGURE_BEGIN_FILLED);
-        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(9.5f,6.5f),D2D1::Point2F(11.51f,7.81f)));
-        sink->AddLine(D2D1::Point2F(20.49f,13.69f));
-        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(22.5f,15.f),D2D1::Point2F(20.49f,16.31f)));
-        sink->AddLine(D2D1::Point2F(11.51f,22.19f));
-        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(9.5f,23.5f),D2D1::Point2F(9.5f,21.1f)));
-        sink->AddLine(D2D1::Point2F(9.5f,8.9f));
+        sink->BeginFigure(D2D1::Point2F(8.6f,9.4f),D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(8.8f,5.6f),D2D1::Point2F(11.8f,4.3f),D2D1::Point2F(14.3f,5.8f)));
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(17.8f,7.8f),D2D1::Point2F(21.1f,10.1f),D2D1::Point2F(23.5f,12.2f)));
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(26.1f,14.1f),D2D1::Point2F(26.1f,15.9f),D2D1::Point2F(23.5f,17.8f)));
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(21.1f,19.9f),D2D1::Point2F(17.8f,22.2f),D2D1::Point2F(14.3f,24.2f)));
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(11.8f,25.7f),D2D1::Point2F(8.8f,24.4f),D2D1::Point2F(8.6f,20.6f)));
+        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(8.0f,17.2f),D2D1::Point2F(8.0f,12.8f),D2D1::Point2F(8.6f,9.4f)));
         sink->EndFigure(D2D1_FIGURE_END_CLOSED);const auto shapeResult=sink->Close();sink->Release();if(FAILED(shapeResult))return false;
         if(FAILED(factory_->CreatePathGeometry(&refreshShape_)))return false;if(FAILED(refreshShape_->Open(&sink)))return false;
-        sink->BeginFigure(D2D1::Point2F(19.67f,19.67f),D2D1_FIGURE_BEGIN_HOLLOW);
-        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(20.98f,12.21f),D2D1::SizeF(6.6f,6.6f),0.f,D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_LARGE));
+        sink->BeginFigure(D2D1::Point2F(9.33f,13.33f),D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(19.58f,10.67f),D2D1::SizeF(6.f,6.f),0.f,D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
         sink->EndFigure(D2D1_FIGURE_END_OPEN);
-        sink->BeginFigure(D2D1::Point2F(21.15f,8.35f),D2D1_FIGURE_BEGIN_HOLLOW);
-        sink->AddLine(D2D1::Point2F(20.98f,12.21f));
-        sink->AddLine(D2D1::Point2F(17.12f,12.04f));
+        sink->BeginFigure(D2D1::Point2F(20.67f,16.67f),D2D1_FIGURE_BEGIN_HOLLOW);
+        sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(10.42f,19.33f),D2D1::SizeF(6.f,6.f),0.f,D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
         sink->EndFigure(D2D1_FIGURE_END_OPEN);
         const auto refreshResult=sink->Close();sink->Release();if(FAILED(refreshResult))return false;
+        if(FAILED(factory_->CreatePathGeometry(&refreshTips_)))return false;if(FAILED(refreshTips_->Open(&sink)))return false;
+        sink->BeginFigure(D2D1::Point2F(20.9f,8.6f),D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(21.2f,12.1f));
+        sink->AddLine(D2D1::Point2F(17.7f,11.5f));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->BeginFigure(D2D1::Point2F(9.1f,21.4f),D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(8.8f,17.9f));
+        sink->AddLine(D2D1::Point2F(12.3f,18.5f));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        const auto tipsResult=sink->Close();sink->Release();if(FAILED(tipsResult))return false;
         WNDCLASSEXW cls{};cls.cbSize=sizeof(cls);cls.lpfnWndProc=procedure;cls.hInstance=instance;cls.hCursor=LoadCursor(nullptr,IDC_ARROW);cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));cls.hIconSm=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));cls.lpszClassName=L"LDMenu.Direct2D";if(!RegisterClassExW(&cls))return false;
         dpi_=float(GetDpiForSystem());RECT work;SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);int w=std::min(int(800*dpi_/96),int(work.right-work.left-40)),h=int(std::lround(w*9.0/16));if(h>work.bottom-work.top-50){h=int(work.bottom-work.top-50);w=int(std::lround(h*16.0/9));}
         window_=CreateWindowExW(0,cls.lpszClassName,L"LDMenu",WS_POPUP|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU|WS_CLIPCHILDREN,work.left+(work.right-work.left-w)/2,work.top+(work.bottom-work.top-h)/2,w,h,nullptr,nullptr,instance,this);if(!window_)return false;
