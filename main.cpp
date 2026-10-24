@@ -27,9 +27,9 @@ class Application {
     IDWriteTextFormat*font_=nullptr,*small_=nullptr,*bold_=nullptr,*icon_=nullptr,*caption_=nullptr;
     float dpi_=96,width_=800,height_=450,rowScroll_=0;int hover_=-99,focus_=-1;bool tracking_=false;
     int settingsIndex_=-1,dropdown_=0,dropSelection_=0;std::wstring settingsName_,settingsError_;ldcontrol::Config draft_;
-    bool quickMode_=false,deviceReset_=false,globalReset_=false;ldcontrol::QuickConfig quickDraft_;
+    bool deviceReset_=false,globalReset_=false;ldcontrol::QuickConfig quickDraft_;
     unsigned draftDelay_=60;bool applyToRunning_=false;
-    int globalTab_=0;float planScroll_=0;std::vector<ldcontrol::PlayTarget> draftTargets_;
+    int tab_=0;float planScroll_=0;std::vector<ldcontrol::PlayTarget> draftTargets_;
     HWND playDelayEdit_=nullptr,idsEdit_=nullptr;HFONT editFont_=nullptr;WNDPROC editProcedure_=nullptr;
     int scrollVisible_=0,dragScroll_=0;float dragY_=0,dragStart_=0;
     unsigned ramUsed_=0,ramTotal_=0;
@@ -57,26 +57,35 @@ class Application {
     float paneX()const{return (width_-440)/2;}
     bool settingsOpen()const{return settingsIndex_!=-1;}
     bool globalSettings()const{return settingsIndex_==-2;}
-    bool planTab()const{return globalSettings()&&globalTab_==0;}
-    float paneHeight()const{return globalSettings()?396.f:quickMode_?340.f:300.f;}
+    bool planTab()const{return globalSettings()&&tab_==0;}
+    bool quickTab()const{return settingsOpen()&&!globalSettings()&&tab_==0;}
+    float quickButtonY()const{return quickDraft_.function==1?252.f:quickDraft_.function?214.f:150.f;}
+    float planListHeight()const{return std::clamp(state_.rows.empty()?32.f:float(state_.rows.size())*20.f,32.f,208.f);}
+    float controlsY()const{return globalSettings()?272.f:214.f;}
+    float paneHeight()const{
+        const float extra=settingsError_.empty()?16.f:44.f;
+        if(quickTab())return quickButtonY()+32.f+extra;
+        if(planTab())return 142.f+planListHeight()+extra;
+        return (globalSettings()?340.f:246.f)+extra;
+    }
     float paneY()const{return std::max(38.f,(height_-paneHeight())/2);}
-    float controlsY()const{return globalSettings()?280.f:204.f;}
-    float fieldY(int field)const{return globalSettings()?(field==1?108.f:field==2?166.f:224.f):(field==1?76.f:140.f);}
+    float fieldY(int field)const{return field==1?108.f:field==2?166.f:224.f;}
     int delaySelection()const{for(int i=0;i<7;i++)if(UI::Delays[i]==draftDelay_)return i;return 2;}
     int dropdownCount()const{return dropdown_==1?3:7;}
     float dropdownY()const{float y=paneY()+fieldY(dropdown_)+34;return std::min(y,height_-10-dropdownCount()*28);}
     void layoutEditor(){if(!playDelayEdit_)return;const float scale=dpi_/96;
         if(planTab())SetWindowPos(playDelayEdit_,HWND_TOP,int((paneX()+238)*scale),int((paneY()+122)*scale),int(174*scale),int(23*scale),SWP_NOACTIVATE|SWP_SHOWWINDOW);else{if(GetFocus()==playDelayEdit_)SetFocus(window_);ShowWindow(playDelayEdit_,SW_HIDE);}
-        if(idsEdit_){if(settingsOpen()&&quickMode_&&quickDraft_.function&&!dropdown_)SetWindowPos(idsEdit_,HWND_TOP,int((paneX()+32)*scale),int((paneY()+144)*scale),int(376*scale),int(24*scale),SWP_NOACTIVATE|SWP_SHOWWINDOW);else{if(GetFocus()==idsEdit_)SetFocus(window_);ShowWindow(idsEdit_,SW_HIDE);}}
+        if(idsEdit_){if(quickTab()&&quickDraft_.function&&!dropdown_)SetWindowPos(idsEdit_,HWND_TOP,int((paneX()+32)*scale),int((paneY()+176)*scale),int(376*scale),int(24*scale),SWP_NOACTIVATE|SWP_SHOWWINDOW);else{if(GetFocus()==idsEdit_)SetFocus(window_);ShowWindow(idsEdit_,SW_HIDE);}}
     }
     bool readPlayDelay(unsigned&out){wchar_t value[16]{};GetWindowTextW(playDelayEdit_,value,16);if(!*value)return false;out=0;for(auto*p=value;*p;p++){if(*p<L'0'||*p>L'9'||out>3600)return false;out=out*10+unsigned(*p-L'0');}return out<=3600;}
     bool targetSelected(const ldcontrol::Row&r)const{return std::any_of(draftTargets_.begin(),draftTargets_.end(),[&](auto&t){return t.index==r.index&&t.name==r.name;});}
     void setTarget(const ldcontrol::Row&r,bool selected){draftTargets_.erase(std::remove_if(draftTargets_.begin(),draftTargets_.end(),[&](auto&t){return t.index==r.index;}),draftTargets_.end());if(selected)draftTargets_.push_back({r.index,r.name});}
     void checkDraw(float x,float y,bool on){fill(x,y,x+14,y+14,on?UI::Accent:UI::Background,3);if(on)glyph(L"\uE73E",x,y,14,14,UI::Text,true);else stroke(x+.5f,y+.5f,x+13.5f,y+13.5f,UI::Border,3);}
-    void clamp(){rowScroll_=std::clamp(rowScroll_,0.f,std::max(0.f,listContent()-(listBottom()-Top)));planScroll_=std::clamp(planScroll_,0.f,std::max(0.f,float(state_.rows.size())*20-208));}
+    void clamp(){rowScroll_=std::clamp(rowScroll_,0.f,std::max(0.f,listContent()-(listBottom()-Top)));planScroll_=std::clamp(planScroll_,0.f,std::max(0.f,float(state_.rows.size())*20-planListHeight()));}
     void showScroll(int id){scrollVisible_=id;SetTimer(window_,1,1100,nullptr);invalidate();}
     void scrollbar(int id,float top,float bottom,float content,float offset){if(content<=bottom-top||(scrollVisible_!=id&&dragScroll_!=id))return;float visible=bottom-top,thumb=std::max(22.f,visible*visible/content);float y=top+(visible-thumb)*offset/(content-visible);fill(width_-12,y,width_-8,y+thumb,UI::Accent,2);}
-    void updateSnapshot(){const int selected=focus_>=0&&focus_<int(state_.rows.size())?state_.rows[focus_].index:-1;state_=engine_.snapshot();state_.rows.erase(std::remove_if(state_.rows.begin(),state_.rows.end(),[](auto&r){return !r.running;}),state_.rows.end());focus_=-1;for(size_t i=0;i<state_.rows.size();i++)if(state_.rows[i].index==selected)focus_=int(i);hover_=-99;updateRam(false);clamp();invalidate();}
+    static bool rowConnected(const ldcontrol::Row&r){return r.wanted&&r.phase==ldcontrol::Phase::Connected;}
+    void updateSnapshot(){const int selected=focus_>=0&&focus_<int(state_.rows.size())?state_.rows[focus_].index:-1;state_=engine_.snapshot();state_.rows.erase(std::remove_if(state_.rows.begin(),state_.rows.end(),[](auto&r){return !r.running;}),state_.rows.end());focus_=-1;for(size_t i=0;i<state_.rows.size();i++)if(state_.rows[i].index==selected)focus_=int(i);if(settingsIndex_>=0&&std::none_of(state_.rows.begin(),state_.rows.end(),[&](const auto&r){return r.index==settingsIndex_&&r.name==settingsName_&&rowConnected(r);})){settingsIndex_=-1;dropdown_=0;}hover_=-99;updateRam(false);clamp();layoutEditor();invalidate();}
     int functionSelection()const{for(int i=0;i<3;i++)if(UI::FunctionValues[i]==draft_.function)return i;return 0;}
     int hit(float x,float y){
         if(x<0||y<0||x>=width_||y>=height_)return -99;
@@ -84,67 +93,68 @@ class Application {
         if(settingsOpen()){float l=paneX(),t=paneY();
             if(dropdown_){float dy=dropdownY(),count=float(dropdownCount());if(x>=l+20&&x<=l+420&&y>=dy&&y<dy+count*28)return 10000+int((y-dy)/28);return -20;}
             if(x<l||x>l+440||y<t||y>t+paneHeight())return -19;
-            if(y>=t+10&&y<t+40){if(x>=l+396&&x<l+426)return -6;if(!quickMode_){if(x>=l+360&&x<l+390)return -8;if(x>=l+324&&x<l+354)return -7;}}
-            if(quickMode_){if(x>=l+20&&x<=l+420&&y>=t+76&&y<t+108)return -9;if(quickDraft_.function==1&&x>=l+20&&x<=l+420&&y>=t+204&&y<t+236)return -12;if(x>=l+20&&x<=l+420&&y>=t+256&&y<t+288)return -50;return -99;}
-            if(globalSettings()&&y>=t+48&&y<t+78){if(x>=l+20&&x<l+220)return -40;if(x>=l+220&&x<=l+420)return -41;}
-            if(planTab()){if(x>=l+20&&x<=l+210){if(y>=t+116&&y<t+140)return -18;if(y>=t+142&&y<t+350){int row=int((y-t-142+planScroll_)/20);if(row>=0&&row<int(state_.rows.size()))return 20000+row;}}return -99;}
+            if(y>=t+10&&y<t+40){if(x>=l+396&&x<l+426)return -6;if(!quickTab()){if(x>=l+360&&x<l+390)return -8;if(x>=l+324&&x<l+354)return -7;}}
+            if(y>=t+48&&y<t+78){if(x>=l+20&&x<l+220)return -40;if(x>=l+220&&x<=l+420)return -41;}
+            if(quickTab()){const float by=quickButtonY();if(x>=l+20&&x<=l+420&&y>=t+108&&y<t+140)return -9;if(quickDraft_.function==1&&x>=l+20&&x<=l+420&&y>=t+212&&y<t+244)return -12;if(x>=l+20&&x<=l+420&&y>=t+by&&y<t+by+32)return -50;return -99;}
+            if(planTab()){const float lh=planListHeight();if(x>=l+20&&x<=l+210){if(y>=t+116&&y<t+140)return -18;if(y>=t+142&&y<t+142+lh){int row=int((y-t-142+planScroll_)/20);if(row>=0&&row<int(state_.rows.size()))return 20000+row;}}return -99;}
             if(x>=l+20&&x<=l+420){if(y>=t+fieldY(1)&&y<t+fieldY(1)+32)return -9;if(y>=t+fieldY(2)&&y<t+fieldY(2)+32)return -10;}
-            if(globalSettings()&&x>=l+20&&x<=l+420){if(y>=t+fieldY(3)&&y<t+fieldY(3)+32)return -14;if(y>=t+322&&y<t+350)return -15;}
+            if(globalSettings()&&x>=l+20&&x<=l+420){if(y>=t+fieldY(3)&&y<t+fieldY(3)+32)return -14;if(y>=t+312&&y<t+340)return -15;}
             if(y>=t+controlsY()&&y<t+controlsY()+32){if(x>=l+20&&x<l+225)return -11;if(x>=l+245&&x<l+420)return -12;}
             return -99;
         }
         if(x>=width_-18&&y>=Top&&y<listBottom()&&listContent()>listBottom()-Top)return -30;
-        if(y>=Top&&y<listBottom()){int row=int((y-Top+rowScroll_)/RowHeight);if(row>=0&&row<int(state_.rows.size())){if(x>=width_-56&&x<width_-20)return 1000+row;if(x>=width_-90&&x<width_-56)return 3000+row;if(x>=width_-148&&x<width_-96)return row;}}
+        if(y>=Top&&y<listBottom()){int row=int((y-Top+rowScroll_)/RowHeight);if(row>=0&&row<int(state_.rows.size())){if(rowConnected(state_.rows[row])&&x>=width_-56&&x<width_-20)return 1000+row;if(x>=width_-114&&x<width_-62)return row;}}
         return -99;
     }
-    void openSettings(int row){if(row<0||row>=int(state_.rows.size()))return;auto&r=state_.rows[row];settingsIndex_=r.index;settingsName_=r.name;draft_=r.config;quickMode_=false;deviceReset_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
-    void openQuick(int row){if(row<0||row>=int(state_.rows.size()))return;auto&r=state_.rows[row];settingsIndex_=r.index;settingsName_=r.name;quickMode_=true;quickDraft_=r.quick;SetWindowTextW(idsEdit_,ldcontrol::idsText(quickDraft_.ids).c_str());settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
-    void openGlobalSettings(){settingsIndex_=-2;quickMode_=false;globalReset_=false;globalTab_=0;planScroll_=0;settingsName_=L"Cấu Hình";draft_=state_.global.defaults;draftDelay_=state_.global.settleSeconds;draftTargets_=state_.global.playTargets;SetWindowTextW(playDelayEdit_,std::to_wstring(state_.global.playDelaySeconds).c_str());applyToRunning_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
+    void openSettings(int row){if(row<0||row>=int(state_.rows.size())||!rowConnected(state_.rows[row]))return;auto&r=state_.rows[row];settingsIndex_=r.index;settingsName_=r.name;tab_=0;draft_=r.config;quickDraft_=r.quick;SetWindowTextW(idsEdit_,ldcontrol::idsText(quickDraft_.ids).c_str());deviceReset_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
+    void openGlobalSettings(){settingsIndex_=-2;globalReset_=false;tab_=0;planScroll_=0;settingsName_=L"Cấu Hình";draft_=state_.global.defaults;draftDelay_=state_.global.settleSeconds;draftTargets_=state_.global.playTargets;SetWindowTextW(playDelayEdit_,std::to_wstring(state_.global.playDelaySeconds).c_str());applyToRunning_=false;settingsError_.clear();dropdown_=0;layoutEditor();invalidate();}
     void action(int id){
         if(id==-2){PostMessageW(window_,WM_CLOSE,0,0);return;}if(id==-3){ShowWindow(window_,IsZoomed(window_)?SW_RESTORE:SW_MAXIMIZE);return;}if(id==-4){ShowWindow(window_,SW_MINIMIZE);return;}if(engine_.failure())return;if(id==-5){engine_.refresh();return;}
         if(id==-13){openGlobalSettings();return;}
-        if(id==-16){if(state_.playRunning&&!state_.playStopping)engine_.pausePlay();else{std::wstring error;if(!engine_.play(error)){openGlobalSettings();settingsError_=error;}}const auto current=engine_.snapshot();state_.playRunning=current.playRunning;state_.playStopping=current.playStopping;invalidate();return;}
+        if(id==-16){if(state_.playRunning&&!state_.playStopping)engine_.pausePlay();else{std::wstring error;if(!engine_.play(error)){openGlobalSettings();settingsError_=error;layoutEditor();}}const auto current=engine_.snapshot();state_.playRunning=current.playRunning;state_.playStopping=current.playStopping;invalidate();return;}
         if(settingsOpen()){
-            if(id>=10000&&id<10007){int selection=id-10000;if(dropdown_==1&&selection<3){if(quickMode_){quickDraft_.function=UI::QuickValues[selection];if(quickDraft_.function!=1)quickDraft_.sell=false;if(!quickDraft_.function){quickDraft_.ids.clear();SetWindowTextW(idsEdit_,L"");}}else draft_.function=UI::FunctionValues[selection];}if(dropdown_==2&&selection<7)draft_.filter=selection;if(dropdown_==3&&selection<7)draftDelay_=UI::Delays[selection];dropdown_=0;}
-            else if(id==-20)dropdown_=0;else if(id==-6||id==-19){settingsIndex_=-1;dropdown_=0;}else if(id==-7&&!quickMode_){if(planTab()){draftTargets_.clear();SetWindowTextW(playDelayEdit_,L"5");}else{draft_={};if(globalSettings()){draftDelay_=60;applyToRunning_=true;globalReset_=true;}else deviceReset_=true;}settingsError_.clear();}
-            else if(id==-8&&!quickMode_){settingsError_.clear();bool saved=false;if(globalSettings()){ldcontrol::GlobalSettings common;common.defaults=draft_;common.settleSeconds=draftDelay_;common.playTargets=draftTargets_;if(readPlayDelay(common.playDelaySeconds))saved=engine_.configureGlobal(common,applyToRunning_,settingsError_,globalReset_);else settingsError_=L"Delay phải từ 0 đến 3600 giây";}else saved=engine_.configure(settingsIndex_,settingsName_,draft_,settingsError_,deviceReset_);if(saved)settingsIndex_=-1;}
-            else if(id==-50&&quickMode_){wchar_t value[1025]{};if(quickDraft_.function)GetWindowTextW(idsEdit_,value,1025);settingsError_.clear();if(!ldcontrol::parseIds(value,quickDraft_.ids))settingsError_=L"ID: số 1–2147483647, cách bằng dấu phẩy; tối đa 64";else if(engine_.runQuick(settingsIndex_,settingsName_,quickDraft_,settingsError_))settingsIndex_=-1;}
-            else if(id==-9||id==-10||id==-14){dropdown_=id==-9?1:id==-10?2:3;dropSelection_=dropdown_==1?(quickMode_?(quickDraft_.function==14?2:quickDraft_.function==1?1:0):functionSelection()):dropdown_==2?draft_.filter:delaySelection();}
-            else if(id==-11)draft_.reconnect=!draft_.reconnect;else if(id==-12){if(quickMode_)quickDraft_.sell=!quickDraft_.sell;else draft_.sell=!draft_.sell;}
+            if(id>=10000&&id<10007){int selection=id-10000;if(dropdown_==1&&selection<3){if(quickTab()){quickDraft_.function=UI::QuickValues[selection];if(quickDraft_.function!=1)quickDraft_.sell=false;if(!quickDraft_.function){quickDraft_.ids.clear();SetWindowTextW(idsEdit_,L"");}}else draft_.function=UI::FunctionValues[selection];}if(dropdown_==2&&selection<7)draft_.filter=selection;if(dropdown_==3&&selection<7)draftDelay_=UI::Delays[selection];dropdown_=0;}
+            else if(id==-20)dropdown_=0;else if(id==-6||id==-19){settingsIndex_=-1;dropdown_=0;}else if(id==-7&&!quickTab()){if(planTab()){draftTargets_.clear();SetWindowTextW(playDelayEdit_,L"5");}else{draft_={};if(globalSettings()){draftDelay_=60;applyToRunning_=true;globalReset_=true;}else deviceReset_=true;}settingsError_.clear();}
+            else if(id==-8&&!quickTab()){settingsError_.clear();bool saved=false;if(globalSettings()){ldcontrol::GlobalSettings common;common.defaults=draft_;common.settleSeconds=draftDelay_;common.playTargets=draftTargets_;if(readPlayDelay(common.playDelaySeconds))saved=engine_.configureGlobal(common,applyToRunning_,settingsError_,globalReset_);else settingsError_=L"Delay phải từ 0 đến 3600 giây";}else saved=engine_.configure(settingsIndex_,settingsName_,draft_,settingsError_,deviceReset_);if(saved)settingsIndex_=-1;}
+            else if(id==-50&&quickTab()){wchar_t value[1025]{};if(quickDraft_.function)GetWindowTextW(idsEdit_,value,1025);settingsError_.clear();if(!ldcontrol::parseIds(value,quickDraft_.ids))settingsError_=L"ID: số 1–2147483647, cách bằng dấu phẩy; tối đa 64";else if(engine_.runQuick(settingsIndex_,settingsName_,quickDraft_,settingsError_))settingsIndex_=-1;}
+            else if(id==-9||id==-10||id==-14){dropdown_=id==-9?1:id==-10?2:3;dropSelection_=dropdown_==1?(quickTab()?(quickDraft_.function==14?2:quickDraft_.function==1?1:0):functionSelection()):dropdown_==2?draft_.filter:delaySelection();}
+            else if(id==-11)draft_.reconnect=!draft_.reconnect;else if(id==-12){if(quickTab())quickDraft_.sell=!quickDraft_.sell;else draft_.sell=!draft_.sell;}
             else if(id==-15)applyToRunning_=!applyToRunning_;
-            else if(id==-40||id==-41){globalTab_=id==-40?0:1;dropdown_=0;}
+            else if(id==-40||id==-41){tab_=id==-40?0:1;dropdown_=0;settingsError_.clear();}
             else if(planTab()&&id>=20000&&id<20512){int row=id-20000;if(row<int(state_.rows.size())){auto r=state_.rows[row];setTarget(r,!targetSelected(r));}}
             else if(planTab()&&id==-18){bool all=!state_.rows.empty()&&std::all_of(state_.rows.begin(),state_.rows.end(),[&](auto&r){return targetSelected(r);});for(const auto&r:state_.rows)setTarget(r,!all);}
-            layoutEditor();invalidate();return;
+            clamp();layoutEditor();invalidate();return;
         }
-        if(id>=3000&&id<3512){openQuick(id-3000);return;}if(id>=1000&&id<1512){openSettings(id-1000);return;}if(id>=0&&id<int(state_.rows.size())){focus_=id;engine_.toggle(state_.rows[id].index);}
+        if(id>=1000&&id<1512){openSettings(id-1000);return;}if(id>=0&&id<int(state_.rows.size())){focus_=id;engine_.toggle(state_.rows[id].index);}
     }
-    void drawDropdown(){if(!dropdown_)return;float l=paneX(),y=dropdownY();int count=dropdownCount();fill(l+20,y,l+420,y+count*28,UI::Panel,5);stroke(l+20,y,l+420,y+count*28,UI::Border,5);for(int i=0;i<count;i++){if(i==dropSelection_||hover_==10000+i)fill(l+22,y+i*28+1,l+418,y+(i+1)*28-1,UI::Accent,3);text(dropdown_==1?std::wstring(quickMode_?UI::QuickFunctions[i]:UI::Functions[i]):dropdown_==2?std::wstring(UI::Filters[i]):std::to_wstring(UI::Delays[i])+L" giây",l+32,y+i*28,370,28,UI::Text);}}
+    void drawDropdown(){if(!dropdown_)return;float l=paneX(),y=dropdownY();int count=dropdownCount();fill(l+20,y,l+420,y+count*28,UI::Panel,5);stroke(l+20,y,l+420,y+count*28,UI::Border,5);for(int i=0;i<count;i++){if(i==dropSelection_||hover_==10000+i)fill(l+22,y+i*28+1,l+418,y+(i+1)*28-1,UI::Accent,3);text(dropdown_==1?std::wstring(quickTab()?UI::QuickFunctions[i]:UI::Functions[i]):dropdown_==2?std::wstring(UI::Filters[i]):std::to_wstring(UI::Delays[i])+L" giây",l+32,y+i*28,370,28,UI::Text);}}
     void settingsDraw(){
-        float l=paneX(),t=paneY();fill(0,32,width_,height_,0x000000,0,.78f);fill(l,t,l+440,t+paneHeight(),UI::Panel,9);stroke(l,t,l+440,t+paneHeight(),UI::Border,9);
+        const float l=paneX(),t=paneY(),ph=paneHeight();fill(0,32,width_,height_,0x000000,0,.78f);fill(l,t,l+440,t+ph,UI::Panel,9);stroke(l,t,l+440,t+ph,UI::Border,9);
         text(settingsName_,l+20,t+10,290,30,UI::Text,bold_);
-        if(!quickMode_){if(!globalSettings()||!planTab()){if(hover_==-7)fill(l+324,t+10,l+354,t+40,0x301018,5);glyph(L"\uE72C",l+324,t+10,30,30,UI::Red);}else iconButton(-7,L"\uE72C",l+324,t+10);iconButton(-8,L"\uE74E",l+360,t+10);}iconButton(-6,L"\uE8BB",l+396,t+10);
-        if(quickMode_){
-            text(L"Chức Năng",l+20,t+50,400,24,UI::Muted,small_);fill(l+20,t+76,l+420,t+108,UI::Background,5);stroke(l+20,t+76,l+420,t+108,UI::Border,5);text(UI::QuickFunctions[quickDraft_.function==14?2:quickDraft_.function==1?1:0],l+32,t+76,350,32,UI::Text);glyph(L"\uE70D",l+388,t+76,24,32,UI::Accent);
-            if(quickDraft_.function){text(quickDraft_.function==1?L"ID Cá":L"ID",l+20,t+114,400,24,UI::Muted,small_);fill(l+20,t+140,l+420,t+172,UI::Background,5);stroke(l+20,t+140,l+420,t+172,UI::Border,5);}
-            if(quickDraft_.function==1){text(L"BÁN NHANH",l+20,t+204,320,32,UI::Text,bold_);toggleDraw(l+384,t+211,quickDraft_.sell);}
-            fill(l+20,t+256,l+420,t+288,hover_==-50?0xc454ff:UI::Accent,5);glyph(L"\uE768",l+205,t+256,30,32,UI::Text);
-            if(!settingsError_.empty())text(settingsError_,l+20,t+298,400,30,UI::Red,small_);drawDropdown();return;
+        if(!quickTab()){if(!globalSettings()||!planTab()){if(hover_==-7)fill(l+324,t+10,l+354,t+40,0x301018,5);glyph(L"\uE72C",l+324,t+10,30,30,UI::Red);}else iconButton(-7,L"\uE72C",l+324,t+10);iconButton(-8,L"\uE74E",l+360,t+10);}iconButton(-6,L"\uE8BB",l+396,t+10);
+        for(int tab=0;tab<2;tab++){float x=l+20+tab*200;bool selected=tab_==tab;if(selected||hover_==-40-tab)fill(x,t+48,x+200,t+78,UI::Hover,4);text(globalSettings()?(tab?L"Cấu Hình LD":L"Cấu Hình Chung"):(tab?L"Tự Động":L"Chức Năng"),x,t+48,200,30,selected?UI::Accent:UI::Muted,bold_,DWRITE_TEXT_ALIGNMENT_CENTER);if(selected)fill(x+20,t+76,x+180,t+78,UI::Accent);}
+        if(quickTab()){
+            const float by=quickButtonY();
+            text(L"Chức Năng",l+20,t+82,400,24,UI::Muted,small_);fill(l+20,t+108,l+420,t+140,UI::Background,5);stroke(l+20,t+108,l+420,t+140,UI::Border,5);text(UI::QuickFunctions[quickDraft_.function==14?2:quickDraft_.function==1?1:0],l+32,t+108,350,32,UI::Text);glyph(L"\uE70D",l+388,t+108,24,32,UI::Accent);
+            if(quickDraft_.function){text(quickDraft_.function==1?L"ID Cá":L"ID",l+20,t+146,400,24,UI::Muted,small_);fill(l+20,t+172,l+420,t+204,UI::Background,5);stroke(l+20,t+172,l+420,t+204,UI::Border,5);}
+            if(quickDraft_.function==1){text(L"BÁN NHANH",l+20,t+212,320,32,UI::Text,bold_);toggleDraw(l+384,t+219,quickDraft_.sell);}
+            fill(l+20,t+by,l+420,t+by+32,hover_==-50?0xc454ff:UI::Accent,5);glyph(L"\uE768",l+205,t+by,30,32,UI::Text);
+            if(!settingsError_.empty())text(settingsError_,l+20,t+ph-34,400,26,UI::Red,small_);drawDropdown();return;
         }
-        if(globalSettings())for(int tab=0;tab<2;tab++){float x=l+20+tab*200;bool selected=globalTab_==tab;if(selected||hover_==-40-tab)fill(x,t+48,x+200,t+78,UI::Hover,4);text(tab?L"Cấu Hình LD":L"Cấu Hình Chung",x,t+48,200,30,selected?UI::Accent:UI::Muted,bold_,DWRITE_TEXT_ALIGNMENT_CENTER);if(selected)fill(x+20,t+76,x+180,t+78,UI::Accent);}
         if(planTab()){
+            const float lh=planListHeight();
             text(L"Áp Dụng Cho:",l+20,t+86,190,26,UI::Text);text(L"Delay Giữa Các LD (s):",l+230,t+86,190,26,UI::Text);fill(l+230,t+118,l+420,t+150,UI::Background,4);stroke(l+230,t+118,l+420,t+150,UI::Border,4);
             bool all=!state_.rows.empty()&&std::all_of(state_.rows.begin(),state_.rows.end(),[&](auto&r){return targetSelected(r);});checkDraw(l+26,t+121,all);text(L"All",l+52,t+116,150,24,UI::Text,bold_);
-            target_->PushAxisAlignedClip(D2D1::RectF(l+20,t+142,l+210,t+350),D2D1_ANTIALIAS_MODE_ALIASED);
-            for(size_t i=0;i<state_.rows.size();i++){float y=t+142+float(i)*20-planScroll_;if(y+20<=t+142||y>=t+350)continue;if(hover_==20000+int(i))fill(l+20,y,l+210,y+20,UI::Hover,3);checkDraw(l+26,y+3,targetSelected(state_.rows[i]));text(state_.rows[i].name,l+52,y,150,20,UI::Text);}
-            if(state_.rows.empty())text(L"Chưa có LD đang mở",l+26,t+148,180,30,UI::Muted,small_);target_->PopAxisAlignedClip();
-            float content=float(state_.rows.size())*20;if(content>208&&scrollVisible_==3){float thumb=std::max(22.f,208*208/content),y=t+142+(208-thumb)*planScroll_/(content-208);fill(l+206,y,l+210,y+thumb,UI::Accent,2);}
-            if(!settingsError_.empty())text(settingsError_,l+20,t+354,400,28,UI::Red,small_);return;
+            target_->PushAxisAlignedClip(D2D1::RectF(l+20,t+142,l+210,t+142+lh),D2D1_ANTIALIAS_MODE_ALIASED);
+            for(size_t i=0;i<state_.rows.size();i++){float y=t+142+float(i)*20-planScroll_;if(y+20<=t+142||y>=t+142+lh)continue;if(hover_==20000+int(i))fill(l+20,y,l+210,y+20,UI::Hover,3);checkDraw(l+26,y+3,targetSelected(state_.rows[i]));text(state_.rows[i].name,l+52,y,150,20,UI::Text);}
+            if(state_.rows.empty())text(L"Chưa có LD đang mở",l+26,t+146,180,24,UI::Muted,small_);target_->PopAxisAlignedClip();
+            float content=float(state_.rows.size())*20;if(content>lh&&scrollVisible_==3){float thumb=std::max(22.f,lh*lh/content),y=t+142+(lh-thumb)*planScroll_/(content-lh);fill(l+206,y,l+210,y+thumb,UI::Accent,2);}
+            if(!settingsError_.empty())text(settingsError_,l+20,t+ph-34,400,26,UI::Red,small_);return;
         }
         for(int field=1;field<=2;field++){float y=t+fieldY(field);text(field==1?L"Chức Năng":L"Lọc Bọ",l+20,y-26,400,24,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Background,5);stroke(l+20,y,l+420,y+32,UI::Border,5);text(field==1?UI::Functions[functionSelection()]:UI::Filters[draft_.filter],l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);}
-        if(globalSettings()){float y=t+fieldY(3);text(L"Chờ Sau Kết Nối",l+20,y-26,400,24,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Background,5);stroke(l+20,y,l+420,y+32,UI::Border,5);text(std::to_wstring(draftDelay_)+L" giây",l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);text(L"Áp Dụng Cho LD Đang Mở",l+20,t+322,350,28,UI::Text);toggleDraw(l+384,t+327,applyToRunning_);}
+        if(globalSettings()){float y=t+fieldY(3);text(L"Chờ Sau Kết Nối",l+20,y-26,400,24,UI::Muted,small_);fill(l+20,y,l+420,y+32,UI::Background,5);stroke(l+20,y,l+420,y+32,UI::Border,5);text(std::to_wstring(draftDelay_)+L" giây",l+32,y,350,32,UI::Text);glyph(L"\uE70D",l+388,y,24,32,UI::Accent);text(L"Áp Dụng Cho LD Đang Mở",l+20,t+312,350,28,UI::Text);toggleDraw(l+384,t+317,applyToRunning_);}
         const float cy=t+controlsY();text(L"RECONNECT",l+20,cy,140,32,UI::Text,bold_);toggleDraw(l+169,cy+7,draft_.reconnect);text(L"BÁN",l+245,cy,100,32,UI::Text,bold_);toggleDraw(l+384,cy+7,draft_.sell);
-        if(!settingsError_.empty())text(settingsError_,l+20,t+paneHeight()-42,400,26,UI::Red,small_);
+        if(!settingsError_.empty())text(settingsError_,l+20,t+ph-34,400,26,UI::Red,small_);
         drawDropdown();
     }
     void draw(){
@@ -162,8 +172,10 @@ class Application {
         for(size_t i=0;i<state_.rows.size();i++){auto&r=state_.rows[i];float y=Top+float(i)*RowHeight-rowScroll_;if(y+RowHeight<=Top||y>=listBottom())continue;
             fill(20,y,width_-20,y+RowHeight-3,UI::Panel,5);text(r.name,34,y,180,RowHeight-3,UI::Text,bold_);
             unsigned c=r.phase==ldcontrol::Phase::Connected?UI::Green:r.phase==ldcontrol::Phase::Failed?UI::Red:r.wanted?UI::Amber:UI::Text;
-            text(ldcontrol::phaseText(r.phase),230,y,130,RowHeight-3,c,small_);if(r.phase!=ldcontrol::Phase::Idle)text(r.detail,367,y,width_-543,RowHeight-3,UI::Muted,small_);
-            toggleDraw(width_-142,y+5,r.wanted);iconButton(3000+int(i),L"\uE945",width_-88,y,28);iconButton(1000+int(i),L"\uE713",width_-54,y,28);
+            text(ldcontrol::phaseText(r.phase),230,y,130,RowHeight-3,c,small_);if(r.phase!=ldcontrol::Phase::Idle)text(r.detail,367,y,width_-509,RowHeight-3,UI::Muted,small_);
+            toggleDraw(width_-108,y+5,r.wanted);
+            if(rowConnected(r))iconButton(1000+int(i),L"\uE713",width_-54,y,28);
+            else glyph(L"\uE713",width_-54,y,28,28,0x383838);
         }
         if(state_.rows.empty())text(state_.scanning?L"Đang đọc danh sách LDPlayer...":L"Chưa có LDPlayer đang mở",34,Top+12,width_-100,36,UI::Muted);
         target_->PopAxisAlignedClip();scrollbar(1,Top,listBottom(),listContent(),rowScroll_);
@@ -196,7 +208,7 @@ class Application {
         case WM_TIMER:if(p==1&&!dragScroll_&&hover_!=-30){KillTimer(window_,1);scrollVisible_=0;invalidate();}else if(p==2&&!IsIconic(window_)){updateRam(true);}return 0;
         case WM_KEYDOWN:
             if(p==VK_ESCAPE&&settingsOpen()){if(dropdown_)dropdown_=0;else settingsIndex_=-1;layoutEditor();invalidate();return 0;}
-            if(settingsOpen()){if(dropdown_&&(p==VK_DOWN||p==VK_UP)){int n=dropdownCount();dropSelection_=(dropSelection_+(p==VK_UP?-1:1)+n)%n;invalidate();return 0;}if(p==VK_RETURN){action(dropdown_?10000+dropSelection_:quickMode_?-50:-8);return 0;}return 0;}
+            if(settingsOpen()){if(dropdown_&&(p==VK_DOWN||p==VK_UP)){int n=dropdownCount();dropSelection_=(dropSelection_+(p==VK_UP?-1:1)+n)%n;invalidate();return 0;}if(p==VK_RETURN){action(dropdown_?10000+dropSelection_:quickTab()?-50:-8);return 0;}return 0;}
             if(p==VK_F5){engine_.refresh();return 0;}if(p==VK_TAB||p==VK_DOWN||p==VK_UP){if(!state_.rows.empty()){int n=int(state_.rows.size());focus_=(focus_+(p==VK_UP?-1:1)+n)%n;rowScroll_=std::clamp(float(focus_)*RowHeight-(listBottom()-Top)/2,0.f,std::max(0.f,listContent()-(listBottom()-Top)));showScroll(1);}return 0;}if(p==VK_SPACE||p==VK_RETURN){action(focus_);return 0;}break;
         case WM_CLOSE:KillTimer(window_,2);engine_.stop();DestroyWindow(window_);return 0;
         case WM_DESTROY:PostQuitMessage(0);return 0;
