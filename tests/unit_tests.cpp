@@ -178,6 +178,10 @@ int tests(){int count=0,failed=0;auto check=[&](bool ok){count++;if(!ok){failed+
         Engine c;Row r;r.index=2;r.name=L"LD-2";r.running=r.wanted=true;r.bootId="11111111-2222-4333-8444-555555555555";r.rootReady=true;r.phase=Phase::Connected;r.applyAt=10;
         c.state_.rows={r};ULONGLONG due=~0ULL;std::shared_ptr<Job> job;Row picked;
         check(c.selectJobLocked(100,due,job,picked)&&job->bootId==r.bootId&&job->rootReady);
+
+        unsigned repairs=2;refreshRepairBudget(repairs,1000,300999);check(repairs==2);
+        refreshRepairBudget(repairs,1000,301000);check(repairs==0);
+        check(canRepairAdb(false,"")&&canRepairAdb(true,"adb: cannot connect to daemon")&&!canRepairAdb(true,"List of devices attached\n"));
     }
     std::printf("BACKEND_TESTS %d/%d\n",count-failed,count);return failed?1:0;
 }

@@ -8,6 +8,7 @@
 #include <new>
 #include <bcrypt.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 
 namespace ldcontrol {
 static constexpr wchar_t Console[]=L"D:\\LDPlayer\\LDPlayer9\\ldconsole.exe";
@@ -17,6 +18,13 @@ static constexpr unsigned char BuildId[]={0x57,0x5b,0x33,0x22,0x44,0xc8,0x36,0xf
 static constexpr char Package[]="com.vng.playtogether";
 struct Handle { HANDLE h; explicit Handle(HANDLE v=nullptr):h(v){} ~Handle(){if(h&&h!=INVALID_HANDLE_VALUE)CloseHandle(h);} Handle(const Handle&)=delete; };
 struct CommandGuard { HANDLE process;~CommandGuard(){if(WaitForSingleObject(process,0)==WAIT_TIMEOUT){TerminateProcess(process,1);WaitForSingleObject(process,1000);}} };
+static void killAdbProcesses(){
+    Handle snap(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));if(snap.h==INVALID_HANDLE_VALUE)return;
+    PROCESSENTRY32W pe{};pe.dwSize=sizeof(pe);if(!Process32FirstW(snap.h,&pe))return;
+    do{if(_wcsicmp(pe.szExeFile,L"adb.exe")==0){Handle proc(OpenProcess(PROCESS_TERMINATE|SYNCHRONIZE,FALSE,pe.th32ProcessID));if(proc.h){TerminateProcess(proc.h,1);WaitForSingleObject(proc.h,500);}}}while(Process32NextW(snap.h,&pe));
+}
+static void refreshRepairBudget(unsigned&repairs,ULONGLONG lastRepair,ULONGLONG now){if(lastRepair&&now>=lastRepair+300000ULL)repairs=0;}
+static bool canRepairAdb(bool listed,const std::string&listing){return !listed||listing.find("List of devices attached")==std::string::npos;}
 static std::string trim(std::string s){auto first=s.find_first_not_of(" \r\n\t"),last=s.find_last_not_of(" \r\n\t");return first==std::string::npos?"":s.substr(first,last-first+1);}
 static std::wstring wide(const std::string&s){if(s.empty())return {};UINT cp=CP_UTF8;int n=MultiByteToWideChar(cp,MB_ERR_INVALID_CHARS,s.data(),int(s.size()),nullptr,0);if(!n){cp=CP_ACP;n=MultiByteToWideChar(cp,0,s.data(),int(s.size()),nullptr,0);}std::wstring out(n,L'\0');if(n)MultiByteToWideChar(cp,0,s.data(),int(s.size()),out.data(),n);return out;}
 static bool number(const std::string&s,unsigned long long&n,unsigned base=10){if(s.empty()||s.size()>(base==10?20u:16u))return false;n=0;for(char c:s){unsigned v=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:99;if(v>=base||n>(~0ULL-v)/base)return false;n=n*base+v;}return true;}
@@ -91,7 +99,7 @@ static bool assetHash(const std::wstring&path,const char*expected=Digest){Handle
 static bool commitReady(){PERFORMANCE_INFORMATION p{};p.cb=sizeof(p);return GetPerformanceInfo(&p,sizeof(p))&&p.CommitLimit>p.CommitTotal&&static_cast<unsigned long long>(p.CommitLimit-p.CommitTotal)*p.PageSize>=2ULL*1024*1024*1024;}
 static std::wstring quoteArg(const std::wstring&s){std::wstring out=L"\"";unsigned slashes=0;for(auto c:s){if(c==L'\\'){slashes++;continue;}if(c==L'\"'){out.append(slashes*2+1,L'\\');out+=c;}else{out.append(slashes,L'\\');out+=c;}slashes=0;}out.append(slashes*2,L'\\');return out+L"\"";}
 std::wstring phaseText(Phase p){switch(p){case Phase::Idle:return L"Sẵn sàng";case Phase::Queued:return L"Đang chờ";case Phase::Checking:return L"Kiểm tra";case Phase::Repairing:return L"Sửa kết nối";case Phase::Opening:return L"Mở game";case Phase::Loading:return L"Đang kết nối";case Phase::Connected:return L"Thành công";case Phase::Applying:return L"Áp dụng cấu hình";case Phase::WaitingAdb:return L"Chờ ADB";case Phase::WaitingContext:return L"Chờ xác minh";case Phase::Cooldown:return L"Tạm chờ";case Phase::Failed:return L"Thất bại";case Phase::Closed:return L"Đã tắt";}return {};}
-Engine::Engine(){stop_=CreateEventW(nullptr,TRUE,FALSE,nullptr);wake_=CreateEventW(nullptr,FALSE,FALSE,nullptr);}
+Engine::Engine(){SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX|SEM_NOOPENFILEERRORBOX);stop_=CreateEventW(nullptr,TRUE,FALSE,nullptr);wake_=CreateEventW(nullptr,FALSE,FALSE,nullptr);}
 Engine::~Engine(){stop();if(stop_)CloseHandle(stop_);if(wake_)CloseHandle(wake_);}
 void Engine::start(HWND w){window_=w;try{if(!stop_||!wake_){halt(3);return;}if(!thread_.joinable()){loadSettings(settings_,settingsError_,&state_.global);state_.error=settingsError_;thread_=std::thread([this]()noexcept{try{loop();}catch(const std::bad_alloc&){halt(1);}catch(...){halt(2);}});}}catch(const std::bad_alloc&){halt(1);}catch(...){halt(2);}}
 void Engine::halt(unsigned reason)noexcept{unsigned expected=0;if(workerFailure_.compare_exchange_strong(expected,reason?reason:2)){if(stop_)SetEvent(stop_);if(wake_)SetEvent(wake_);if(window_)PostMessageW(window_,WorkerFailed,workerFailure_.load(),0);}}
@@ -168,7 +176,7 @@ bool Engine::command(bool adb,const std::wstring&args,std::string&out,const std:
     DWORD code=1;if(done)GetExitCodeProcess(pi.hProcess,&code);else{TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,1000);}return ok&&done&&code==0;
 }
 bool Engine::shell(const std::shared_ptr<Job>&j,const std::wstring&text,std::string&out,DWORD timeout){
-    if(j->bootId.empty())return command(false,L"adb --index "+std::to_wstring(j->index)+L" --command "+quoteArg(L"shell "+text),out,j,timeout);
+    if(j->bootId.empty())return command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell "+quoteArg(text),out,j,timeout);
     const std::wstring boot(j->bootId.begin(),j->bootId.end());const auto guarded=L"test $(cat /proc/sys/kernel/random/boot_id) = "+boot+L" && { "+text+L"; }";
     return command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell "+quoteArg(guarded),out,j,timeout);
 }
@@ -264,31 +272,40 @@ void Engine::monitor(){
 bool Engine::ensureAdb(const std::shared_ptr<Job>&j){
     if(!j->bootId.empty()){
         std::string current;unsigned long long uid=0;
-        if(shell(j,L"id -u",current)&&number(trim(current),uid)){j->rootReady=(uid==0);return true;}
+        if(shell(j,L"id -u",current)&&number(trim(current),uid)){j->rootReady=(uid==0);adbRepairs_=0;return true;}
     }
     std::string text,listing;auto marker=[&]{
-        j->bootId.clear();j->rootReady=false;if(!shell(j,L"cat /proc/sys/kernel/random/boot_id",text))return false;const auto boot=trim(text);if(!validBoot(boot))return false;
-        j->bootId=boot;unsigned long long uid=0;if(!shell(j,L"id -u",text)||!number(trim(text),uid)){j->bootId.clear();return false;}
-        j->rootReady=(uid==0);return true;
+        j->bootId.clear();j->rootReady=false;if(!shell(j,L"cat /proc/sys/kernel/random/boot_id",text,HealthTimeoutMs))return false;const auto boot=trim(text);if(!validBoot(boot))return false;
+        j->bootId=boot;unsigned long long uid=0;if(!shell(j,L"id -u",text,HealthTimeoutMs)||!number(trim(text),uid)){j->bootId.clear();return false;}
+        j->rootReady=(uid==0);adbRepairs_=0;return true;
     };
-    if(marker())return true;bool listed=command(true,L"devices",listing,j);Link link=classify(false,listed,listing,j->index);
-    if(link==Link::Unknown){defer(j,Phase::WaitingAdb,L"Chờ ADB phản hồi; không reset khi chưa rõ lỗi");return false;}
-    if(adbRepairs_>=2){defer(j,Phase::WaitingAdb,L"Chờ ADB hồi lại; đã dùng 2 lượt reset");return false;}
+    if(marker())return true;
+    if(cancelled(j))return false;
+    bool listed=command(true,L"devices",listing,j,HealthTimeoutMs);Link link=classify(false,listed,listing,j->index);
+    if(link==Link::Unknown&&!canRepairAdb(listed,listing)){
+        command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" reconnect",text,j,HealthTimeoutMs);
+        if(wait(1000,j)&&marker())return true;
+    }
     Row row;if(!fresh(j,row)){report(j,Phase::Failed,L"LD đã tắt hoặc đổi danh tính");return false;}
-    if(lastRepair_&&GetTickCount64()<lastRepair_+60000){defer(j,Phase::WaitingAdb,L"Chờ giới hạn phục hồi ADB",std::max(GetTickCount64()+HealthIntervalMs,lastRepair_+60000));return false;}
-    report(j,Phase::Repairing,L"Mất ADB; phục hồi ADB server");adbRepairs_++;lastRepair_=GetTickCount64();
-    if(!command(true,L"kill-server",text,j)||!command(true,L"start-server",text,j)){defer(j,Phase::WaitingAdb,L"Chờ ADB server hồi lại");return false;}
+    const auto now=GetTickCount64();refreshRepairBudget(adbRepairs_,lastRepair_,now);
+    if(adbRepairs_>=2){defer(j,Phase::WaitingAdb,L"Chờ giới hạn phục hồi ADB (5 phút)",std::max(now+HealthIntervalMs,lastRepair_+300000ULL));return false;}
+    if(lastRepair_&&now<lastRepair_+60000ULL){defer(j,Phase::WaitingAdb,L"Chờ giới hạn phục hồi ADB",std::max(now+HealthIntervalMs,lastRepair_+60000ULL));return false;}
+    report(j,Phase::Repairing,L"Mất ADB; khởi động lại ADB server");adbRepairs_++;lastRepair_=GetTickCount64();
+    command(true,L"kill-server",text,j,HealthTimeoutMs);killAdbProcesses();
+    if(!wait(300,j))return false;
+    if(!command(true,L"start-server",text,j)){defer(j,Phase::WaitingAdb,L"Chờ ADB server hồi lại");return false;}
     auto end=GetTickCount64()+20000;while(GetTickCount64()<end&&!cancelled(j)){if(marker())return true;if(!wait(1000,j))break;}
     defer(j,Phase::WaitingAdb,L"ADB chưa khôi phục; tiếp tục chờ");return false;
 }
 void Engine::recoverAdb(const std::shared_ptr<Job>&j,const Row&r){
     std::string boot;const auto prefix=L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" shell ";
     if(!command(true,prefix+L"cat /proc/sys/kernel/random/boot_id",boot,j,HealthTimeoutMs)||!validBoot(trim(boot))){
-        if(adbRepairs_<2&&(!lastRepair_||GetTickCount64()>=lastRepair_+60000)){j->bootId.clear();if(!ensureAdb(j))return;}
+        refreshRepairBudget(adbRepairs_,lastRepair_,GetTickCount64());
+        if(adbRepairs_<2&&(!lastRepair_||GetTickCount64()>=lastRepair_+60000ULL)){j->bootId.clear();if(!ensureAdb(j))return;}
         else{defer(j,Phase::WaitingAdb,L"Chờ ADB hồi lại");return;}
     }
     if(cancelled(j))return;Row now;if(!fresh(j,now)){defer(j,Phase::WaitingAdb,L"Chờ xác minh LD sau khi ADB hồi");return;}
-    j->bootId.clear();if(!ensureAdb(j))return;
+    if(j->bootId.empty()&&!ensureAdb(j))return;
     {std::lock_guard<std::mutex> lock(mutex_);for(auto&row:state_.rows)if(row.index==j->index&&row.generation==j->generation){row.vm=now.vm;row.ui=now.ui;row.bootId=j->bootId;row.rootReady=j->rootReady;row.probeErrors=0;row.misses=0;}}
     if(!r.game){if(r.automatic)queueReconnect(j,L"ADB đã hồi; chờ kết nối lại");else report(j,Phase::Queued,L"ADB đã hồi; chờ kết nối");return;}
     std::string output;const auto health=command(true,prefix+quoteArg(healthScript(r.game)),output,j,HealthTimeoutMs)?parseHealth(output,r):Health::Unknown;
@@ -346,7 +363,7 @@ bool Engine::openGame(const std::shared_ptr<Job>&j){
     std::wstring asset=assetPath();if(!assetHash(asset)){report(j,Phase::Failed,L"Thiếu hoặc sai phiên bản thư viện");return false;}
     if(!shell(j,L"if test -e /data/local/tmp/libmod.so; then sha256sum /data/local/tmp/libmod.so; else echo ASSET_ABSENT; fi",text))return false;
     if(trim(text)!="ASSET_ABSENT"&&text.compare(0,64,Digest)!=0){report(j,Phase::Failed,L"Có thư viện khác; dừng để tránh ghi đè");return false;}
-    if(trim(text)=="ASSET_ABSENT"&&!command(false,L"adb --index "+std::to_wstring(j->index)+L" --command "+quoteArg(L"push "+quoteArg(asset)+L" /data/local/tmp/libmod.so"),text,j))return false;
+    if(trim(text)=="ASSET_ABSENT"&&!command(true,L"-s emulator-"+std::to_wstring(5554+2*j->index)+L" push "+quoteArg(asset)+L" /data/local/tmp/libmod.so",text,j))return false;
     if(!shell(j,L"sha256sum /data/local/tmp/libmod.so",text)||text.compare(0,64,Digest)!=0||!shell(j,L"chmod 0644 /data/local/tmp/libmod.so",text))return false;
     Row now;if(!fresh(j,now)||now.vm!=before.vm)return false;
     report(j,Phase::Opening,L"Mở lại game để nạp thư viện");if(!shell(j,L"am force-stop com.vng.playtogether",text)||!wait(1000,j))return false;
@@ -556,8 +573,8 @@ void Engine::connect(const std::shared_ptr<Job>&j){
         if(!commitReady()){report(j,Phase::Failed,L"Commit trống dưới 2 GB; dừng kết nối");return;}
         if(!openGame(j)){
             if(cancelled(j))return;
-            std::string marker,devices;bool echoOk=shell(j,L"echo LDCONTROL_ADB_READY",marker)&&trim(marker)=="LDCONTROL_ADB_READY";
-            if(!echoOk){bool listed=command(true,L"devices",devices,j);if(classify(false,listed,devices,j->index)==Link::Missing&&ensureAdb(j)){continue;}}
+            std::string marker;bool echoOk=shell(j,L"echo LDCONTROL_ADB_READY",marker,HealthTimeoutMs)&&trim(marker)=="LDCONTROL_ADB_READY";
+            if(!echoOk){j->bootId.clear();if(ensureAdb(j))continue;}
             auto snap=snapshot();auto it=std::find_if(snap.rows.begin(),snap.rows.end(),[&](auto&r){return r.index==j->index;});if(it!=snap.rows.end()&&it->phase!=Phase::Failed&&!waitingPhase(it->phase))report(j,Phase::Failed,L"Không xác nhận được lệnh mở game");return;
         }
         j->loaded=true;
